@@ -234,5 +234,40 @@ def body_enable():
     return jsonify(ok=body.set_enabled(bool(d.get("enabled")), target))
 
 
+def pick_host():
+    """Linux: listen on IPv4 and IPv6 (dual stack) so http://localhost works whichever one the browser tries
+    first. Windows sockets are IPv6-only on '::', so use plain IPv4 there."""
+    import socket
+    if os.name != "nt" and socket.has_ipv6:
+        try:
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            s.bind(("::", 0))
+            s.close()
+            return "::"
+        except OSError:
+            pass
+    return "0.0.0.0"
+
+
+def port_in_use(port):
+    """True if something already accepts connections on this port (checked by connecting, which also works
+    on Windows where a second bind to a busy port can silently succeed)."""
+    import socket
+    for addr in ("127.0.0.1", "::1"):
+        try:
+            socket.create_connection((addr, port), timeout=0.5).close()
+            return True
+        except OSError:
+            continue
+    return False
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), threaded=True)
+    host, port = pick_host(), int(os.environ.get("PORT", "8000"))
+    if port_in_use(port):
+        sys.exit("\nCannot start: port %d is already in use.\n"
+                 "Another app.py is probably still running. Stop it (Ctrl+C in its terminal, or "
+                 "'pkill -f app.py') or use another port: PORT=8001 python3 app.py\n" % port)
+    print("\nSesame ground station: open http://127.0.0.1:%d  (or http://<this-device-ip>:%d)\n" % (port, port))
+    app.run(host=host, port=port, threaded=True)

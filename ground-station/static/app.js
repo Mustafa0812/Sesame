@@ -351,7 +351,18 @@ function updateControls(f) {
 
 /* ---------- frame handler */
 let lastImuChart = 0;
+function bootError(msg) {
+  const b = $('boot'); if (!b || b.classList.contains('done')) return;
+  b.classList.add('error'); b.querySelector('b').textContent = 'The dashboard could not start';
+  $('bootMsg').textContent = msg;
+}
+window.addEventListener('error', e => bootError('Script error: ' + e.message));
+window.addEventListener('unhandledrejection', e => bootError('Failed: ' + (e.reason && e.reason.message || e.reason)));
+setTimeout(() => bootError('No data from the server after 8 s. Check that app.py is running in its terminal and has no error, ' +
+  'that nothing else is using this port, and try http://127.0.0.1:8000 instead of localhost.'), 8000);
+
 function onFrame(f) {
+  $('boot').classList.add('done');
   state.frame = f; state.bots = f.bots; assignSlots(f.bots);
   const online = f.bots.filter(b => b.online).length;
   $('subtitle').textContent = `${online} of ${f.bots.length || 0} bots online · ${state.demo ? 'demo mode' : 'live'}`;
