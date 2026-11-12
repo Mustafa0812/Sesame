@@ -58,6 +58,7 @@ Dead zone <input id=dead type=range min=5 max=40 value=15 oninput="gcfg()"> <spa
 <button id=bbtn onclick="btoggle()">Enable body tilt</button>
 Gain <input id=bgain type=range min=5 max=40 value=15 oninput="bcfg()"> <span id=bgainv>1.5</span>
 Max drop <input id=bmax type=range min=10 max=80 value=60 oninput="bcfg()"> <span id=bmaxv>60</span>&deg;</p>
+<p id=msg style="color:#f66"></p>
 <h3>Log</h3><pre id=log></pre>
 <script>
 const SEQ=__SEQ__;
@@ -70,19 +71,22 @@ let gon=false, bon=false;
 function bcfg(){const g=document.getElementById('bgain').value/10, m=+document.getElementById('bmax').value;
   document.getElementById('bgainv').textContent=g.toFixed(1);document.getElementById('bmaxv').textContent=m;
   post('/api/body/config',{gain:g,max_drop:m});}
-async function btoggle(){await post('/api/body/enable',{enabled:!bon,target:document.getElementById('gtarget').value});}
+async function act(u,b){const m=document.getElementById('msg');m.textContent='';
+  try{const r=await post(u,b);const j=await r.json();if(!r.ok||j.ok===false)m.textContent=j.error||'refused (is a bot selected and is tilt arriving?)';}
+  catch(e){m.textContent='request failed: '+e;}}
+async function btoggle(){await act('/api/body/enable',{enabled:!bon,target:document.getElementById('gtarget').value});}
 function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});}
 function gcfg(){document.getElementById('deadv').textContent=document.getElementById('dead').value;
   post('/api/imu/config',{dead:+document.getElementById('dead').value,invert_pitch:document.getElementById('ip').checked,
   invert_roll:document.getElementById('ir').checked,swap:document.getElementById('sw').checked});}
 function gz(){post('/api/imu/zero');}
-async function gtoggle(){await post('/api/imu/enable',{enabled:!gon,target:document.getElementById('gtarget').value});}
+async function gtoggle(){await act('/api/imu/enable',{enabled:!gon,target:document.getElementById('gtarget').value});}
 async function imutick(){
   try{
     const s=await (await fetch('/api/imu')).json();
     gon=s.enabled; bon=s.body;
     document.getElementById('bbtn').textContent=bon?'Disable body tilt':'Enable body tilt';
-    document.getElementById('bts').textContent=bon?s.body_status:'';
+    document.getElementById('bts').textContent=bon?s.body_status:(s.mqtt?'(MQTT tilt arriving)':'(no tilt received yet)');
     document.getElementById('gbtn').textContent=gon?'Disable':'Enable';
     document.getElementById('imus').textContent=s.ok?`pitch ${s.pitch.toFixed(0)}\\u00b0 roll ${s.roll.toFixed(0)}\\u00b0 | ${s.status}`:`IMU: ${s.error}`;
   }catch(e){}
@@ -136,7 +140,7 @@ def cmd():
 def imu_state():
     return jsonify(ok=imu.fresh(), error=imu.error, pitch=guide.pitch, roll=guide.roll,
                    enabled=guide.enabled, status=guide.status, target=guide.target,
-                   body=body.enabled, body_status=body.status)
+                   body=body.enabled, body_status=body.status, mqtt=body.ext_fresh())
 
 
 @app.post("/api/imu/zero")
