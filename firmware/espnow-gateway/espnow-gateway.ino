@@ -43,6 +43,11 @@ void onMessage(const EspNowRxMsg& m) {
   // POSE/POSE8 from a leader bot are not forwarded: the Pi doesn't need the 50 Hz stream.
 }
 
+void sendResult(bool ok) {
+  if (ok) { Serial.println("@OK"); return; }
+  Serial.printf("@ERR send failed: %s (ready=%d)\n", espnowReady ? esp_err_to_name(espnowLastErr) : "ESP-NOW not initialised", espnowReady);
+}
+
 void handleLine(String line) {
   line.trim();
   if (!line.length()) return;
@@ -74,7 +79,7 @@ void handleLine(String line) {
     text.trim();
     String payload = "CMD:" + id + ":" + text;
     if (payload.length() > ESPNOW_MAX_PAYLOAD) { Serial.println("@ERR too long"); return; }
-    Serial.println(espnowSendText(payload) ? "@OK" : "@ERR send failed");
+    sendResult(espnowSendText(payload));
     return;
   }
 
@@ -91,7 +96,7 @@ void handleLine(String line) {
       rest.trim();
     }
     if (n != 8) { Serial.println("@ERR pose needs 8 angles"); return; }
-    Serial.println(espnowSend(ESPNOW_MSG_POSE8, angles, 8) ? "@OK" : "@ERR send failed");
+    sendResult(espnowSend(ESPNOW_MSG_POSE8, angles, 8));
     return;
   }
 

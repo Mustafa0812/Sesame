@@ -90,6 +90,7 @@ struct EspNowPeer {
 static const uint8_t ESPNOW_BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 bool espnowReady = false;
+esp_err_t espnowLastErr = ESP_OK;   // result of the last esp_now_send, for the gateway's error reports
 String espnowName = "";
 QueueHandle_t espnowRxQueue = nullptr;
 uint16_t espnowTxSeq = 0;
@@ -150,6 +151,7 @@ bool espnowSend(uint8_t type, const uint8_t* payload, uint8_t len) {
   pkt.hdr.len = len;
   if (len > 0) memcpy(pkt.payload, payload, len);
   esp_err_t err = esp_now_send(ESPNOW_BROADCAST_MAC, (const uint8_t*)&pkt, sizeof(EspNowHeader) + len);
+  espnowLastErr = err;
   if (err == ESP_OK) { espnowTxCount++; return true; }
   espnowTxFail++;
   return false;
