@@ -1,2 +1,4 @@
 pyserial>=3.5
 flask>=3.0
+smbus2>=0.4
+paho-mqtt>=2.0
