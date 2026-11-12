@@ -10,118 +10,59 @@
 <header class="topbar">
   <div class="brand"><span class="logo">S</span><div><h1>Sesame Ground Station</h1><p id="subtitle">Connecting…</p></div></div>
   <div class="chips">
-    <span class="chip" id="chipGateway"><i></i>Gateway</span>
-    <span class="chip" id="chipTilt"><i></i>IMU</span>
-    <span class="chip" id="chipEnv"><i></i>BMP388</span>
-    <span class="chip" id="chipLink"><i></i>Live</span>
-    <button class="icon-btn" id="themeBtn" title="Toggle light / dark">◐</button>
+    <span class="chip" id="chipLink"><i></i><span>Dashboard</span></span>
+    <span class="chip" id="chipGateway"><i></i><span>Gateway</span></span>
+    <span class="chip" id="chipMqtt"><i></i><span>MQTT</span></span>
+    <span class="chip" id="chipTilt"><i></i><span>IMU</span></span>
+    <span class="chip" id="chipEnv"><i></i><span>BMP388</span></span>
   </div>
 </header>
 
 <main>
-  <!-- ============ ROBOTS ============ -->
-  <section class="card span-12" id="fleet">
+  <section class="card span-12">
     <div class="card-head">
-      <div>
-        <h2>Robots</h2>
-        <p class="muted">Live simulation of each bot. Sequences are replayed from the firmware's own timings.</p>
-      </div>
-      <div class="fleet-tags" id="fleetTags"></div>
+      <div><h2>Robots</h2><p class="muted small">Choose the leader. The other bot follows it and copies every move.</p></div>
+      <div class="leader-pick"><span class="muted small">Leader</span><div class="seg" id="leaderSeg"></div></div>
     </div>
-    <div class="bots" id="bots"></div>
-    <div class="fleet-actions">
-      <button class="btn" id="swapRoles">⇄ Swap leader / follower</button>
-      <label class="muted small">Model front
-        <select id="modelRot"><option value="0">0°</option><option value="1">90°</option><option value="2">180°</option><option value="3">270°</option></select>
-      </label>
-    </div>
+    <div class="bots" id="bots"><p class="muted">Waiting for the bots to report (needs the gateway and the bot firmware running)…</p></div>
   </section>
 
-  <!-- ============ CONTROLS ============ -->
-  <section class="card span-7" id="controls">
-    <div class="card-head"><h2>Sequences</h2>
-      <div class="seg" id="targetSeg" role="tablist" aria-label="Command target"></div>
-    </div>
-    <div class="seq-grid" id="seqGrid"></div>
-    <div class="row">
-      <button class="btn danger" id="stopBtn">■ STOP</button>
-      <p class="muted small" id="targetHint">Sequences run on the leader; the follower mirrors it.</p>
-    </div>
-  </section>
-
-  <section class="card span-5" id="tiltCard">
-    <div class="card-head"><h2>Body tilt</h2><label class="switch"><input type="checkbox" id="bodySwitch"><span></span></label></div>
-    <p class="muted small">The bot leans the way the IMU is tilted. The Pi streams the pose and puts the bot in follower mode.</p>
-    <div class="field"><label for="bodyTarget">Bot</label><select id="bodyTarget"></select></div>
-    <div class="field"><label>Gain <b id="gainV">1.5</b></label><input type="range" id="gain" min="5" max="40" value="15"></div>
-    <div class="field"><label>Max drop <b id="maxV">60</b>°</label><input type="range" id="maxDrop" min="10" max="80" value="60"></div>
-    <p class="status" id="bodyStatus">Off</p>
-  </section>
-
-  <!-- ============ IMU 3D ============ -->
   <section class="card span-7">
-    <div class="card-head"><h2>IMU orientation</h2><div class="readout"><span>Pitch <b id="pitchV">–</b></span><span>Roll <b id="rollV">–</b></span></div></div>
-    <div class="viewport tall" id="imuView"></div>
-    <p class="muted small">Box = IMU attitude. The trail is the path of the gravity vector tip on a sphere (centre ring = level).</p>
+    <div class="card-head"><h2>Sequences</h2><button class="btn danger" id="stopBtn">■ STOP</button></div>
+    <div class="seq-grid" id="seqGrid"></div>
+    <p class="cmd-status" id="cmdStatus">Sequences run on the leader; the follower copies it.</p>
   </section>
 
   <section class="card span-5">
-    <div class="card-head"><h2>Tilt history</h2><span class="muted small">last 30 s</span></div>
-    <div class="chart-box"><canvas id="imuChart"></canvas></div>
-    <details class="walk">
-      <summary>Walk mode (local IMU)</summary>
-      <p class="muted small">Tilt to make the bot walk that way. Needs the IMU wired to this Pi.</p>
-      <div class="field"><label for="walkTarget">Bot</label><select id="walkTarget"></select></div>
-      <div class="field"><label>Dead zone <b id="deadV">15</b>°</label><input type="range" id="dead" min="5" max="40" value="15"></div>
-      <div class="checks">
-        <label><input type="checkbox" id="invP"> invert fwd/back</label>
-        <label><input type="checkbox" id="invR"> invert left/right</label>
-        <label><input type="checkbox" id="swapA"> swap axes</label>
-      </div>
-      <div class="row"><button class="btn" id="zeroBtn">Set level</button><button class="btn primary" id="walkBtn">Enable walk mode</button></div>
-      <p class="status" id="walkStatus">Off</p>
-    </details>
+    <div class="card-head"><h2>Body tilt</h2><label class="switch" title="Body tilt on/off"><input type="checkbox" id="bodySwitch"><span></span></label></div>
+    <p class="muted small">Both bots lean the way the IMU is tilted. While it is on, the Pi leads and every bot follows.</p>
+    <div class="field"><label for="gain">Gain <b id="gainV">1.5</b></label><input type="range" id="gain" min="5" max="40" value="15"></div>
+    <div class="field"><label for="maxDrop">Max drop <b id="maxV">60</b>°</label><input type="range" id="maxDrop" min="10" max="80" value="60"></div>
+    <p class="status" id="bodyStatus">Off</p>
   </section>
 
-  <!-- ============ ENVIRONMENT ============ -->
+  <section class="card span-6">
+    <div class="card-head"><h2>IMU orientation</h2><div class="readout"><span>Pitch <b id="pitchV">–</b></span><span>Roll <b id="rollV">–</b></span><button class="btn small-btn" id="levelBtn" title="Treat the IMU's current position as level">Set level</button></div></div>
+    <canvas class="plot tall" id="imuCanvas"></canvas>
+    <p class="muted small">Drag to rotate. Board = IMU attitude, orange line = up vector, trail = its recent path. Green ring = level.</p>
+  </section>
+
+  <section class="card span-6">
+    <div class="card-head"><h2>Activity</h2><span class="muted small">commands, replies, reboots</span></div>
+    <pre class="log" id="log"></pre>
+  </section>
+
   <section class="card span-6">
     <div class="card-head"><h2>Temperature</h2><div class="big" id="tempV">–<small>°C</small></div></div>
-    <div class="chart-box"><canvas id="tempChart"></canvas></div>
+    <canvas class="plot" id="tempCanvas"></canvas>
   </section>
   <section class="card span-6">
     <div class="card-head"><h2>Pressure</h2><div class="big" id="presV">–<small>hPa</small></div></div>
-    <div class="chart-box"><canvas id="presChart"></canvas></div>
+    <canvas class="plot" id="presCanvas"></canvas>
   </section>
 </main>
 
 <div class="toast" id="toast" role="status"></div>
-<div id="boot"><div><b>Loading dashboard…</b><p id="bootMsg" class="muted small">Waiting for the first data from the server.</p></div></div>
-
-<script>
-/* Boot diagnostics: runs before everything else so a failure always shows up in the overlay. */
-window.__boot = function (msg, isError) {
-  var b = document.getElementById('boot'), p = document.getElementById('bootMsg');
-  if (!b || b.classList.contains('done')) return;
-  p.textContent = msg;
-  if (isError) { b.classList.add('error'); b.querySelector('b').textContent = 'The dashboard could not start'; }
-};
-window.addEventListener('error', function (e) {
-  var t = e.target || {};
-  if (t.src || t.href) __boot('Could not load ' + (t.src || t.href) + '. Is the whole ground-station/static folder on this device (including static/vendor)?', 1);
-  else __boot('Script error: ' + e.message + ' (' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ')', 1);
-}, true);
-window.addEventListener('unhandledrejection', function (e) { __boot('Failed: ' + ((e.reason && e.reason.message) || e.reason), 1); });
-setTimeout(function () { __boot('Still no data after 10 s. Check the terminal running app.py for errors, then try http://127.0.0.1:8000 instead of localhost.', 1); }, 10000);
-__boot('Step 1/4: page loaded, loading libraries…');
-</script>
-<script src="/static/vendor/three.min.js"></script>
-<script src="/static/vendor/STLLoader.js"></script>
-<script src="/static/vendor/OrbitControls.js"></script>
-<script src="/static/vendor/chart.umd.min.js"></script>
-<script>
-if (typeof THREE === 'undefined' || typeof Chart === 'undefined') __boot('Libraries did not load (three.js / Chart.js missing). Copy the complete ground-station/static/vendor folder to this device.', 1);
-else __boot('Step 2/4: libraries ready, starting dashboard…');
-</script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,19 +1,26 @@
-"""Body-tilt mode: the Pi streams servo poses so the bot leans the way the IMU is tilted.
+"""Body-tilt mode: the Pi streams servo poses so the bots lean the way the IMU is tilted.
 
-The Pi acts as the leader (it sends the same POSE8 packets a leader bot streams); the target bot is
-put in follower mode. Joint order is the servo INDEX order used by the firmware:
-    0 R1 hip(front-right)  1 R2 hip(back-right)  2 L1 hip(front-left)  3 L2 hip(back-left)
-    4 R3 lift(back-right)  5 R4 lift(front-right) 6 L4 lift(front-left) 7 L3 lift(back-left)
-(Legs: R1+R4, R2+R3, L1+L4, L2+L3. Front/back is inferred from the 'bow' pose, see README.)
+The Pi acts as the leader (it sends the same POSE8 packets a leader bot streams), so while it is on every bot
+must be a follower (app.py takes care of that). Tilt comes from MQTT (imu_publisher.py -> sesame/tilt).
 
-Stand pose (logical angles, same as runStandPose): hips 135 45 45 135, lifts 0 180 0 180.
+Joint order is the firmware's servo INDEX order (names as in the PCA sketch):
+    0 R1 hip   1 R2 hip   2 L1 hip   3 L2 hip   4 R4 lift   5 R3 lift   6 L3 lift   7 L4 lift
+Stand pose = runStandPose: hips 135 45 45 135, lifts 0 180 0 180 (by index).
+Legs (from the turn gaits): hip 0 + lift 5, hip 3 + lift 7, hip 1 + lift 4, hip 2 + lift 6.
+Front legs are hips 0 and 2 (the 'bow' pose folds only lifts 5 and 6).
 A lift joint moves toward 90 to lower its corner of the body, so a tilt lowers the legs on that side.
 """
 import threading
 import time
 
 STAND = [135, 45, 45, 135, 0, 180, 0, 180]
-SEND_PERIOD_S = 0.04   # 25 Hz stream; the bot's failsafe trips after 500 ms of silence
+SEND_PERIOD_S = 0.04          # 25 Hz; a follower's failsafe trips after 500 ms of silence
+TILT_STALE_S = 0.5
+
+# (index, direction toward "lowered") for each corner, from the stand pose:
+#   idx 4 starts at 0 and lowers by increasing; idx 5 starts at 180 and lowers by decreasing; etc.
+#   Corners (inferred from the 'bow' pose: R1/L1 legs are the front): FR = 5, FL = 6, BR = 4, BL = 7.
+CORNERS = {"FR": (5, -1), "FL": (6, +1), "BR": (4, +1), "BL": (7, -1)}
 
 
 def _dead(v, dz):
@@ -23,88 +30,55 @@ def _dead(v, dz):
 
 
 class BodyTilt:
-    def __init__(self, guide, gw):
-        self.guide, self.gw = guide, gw
+    def __init__(self, gw):
+        self.gw = gw
         self.enabled = False
-        self.target = ""
-        self.gain = 1.5        # servo degrees of leg drop per degree of tilt
-        self.max_drop = 60.0   # never fold a lift joint more than this far from stand
-        self.dead = 3.0        # degrees of tilt ignored
-        self.smooth = 0.35     # 0..1, higher = snappier
-        self.d = [0.0] * 4     # smoothed drop for FR, FL, BR, BL
+        self.gain = 1.5          # servo degrees of leg drop per degree of tilt
+        self.max_drop = 60.0     # never fold a lift joint more than this far from stand
+        self.dead = 3.0          # degrees of tilt ignored
+        self.smooth = 0.35       # 0..1, higher = snappier
+        self.pitch = self.roll = 0.0
+        self.tilt_time = 0.0
+        self.d = {k: 0.0 for k in CORNERS}
         self.status = "off"
-        self._finishing = False
-        self.ext_pitch = 0.0   # tilt received from elsewhere (MQTT); wins over the local IMU while fresh
-        self.ext_roll = 0.0
-        self.ext_time = 0.0
-        self.last_pose = list(STAND)   # what is being streamed, for the dashboard simulator
+        self._hold_until = 0.0   # after switching off, keep streaming the stand pose until this time
         threading.Thread(target=self._run, daemon=True).start()
 
-    def set_external(self, pitch, roll):
-        """Final tilt in degrees, relative to level: pitch + = lean forward, roll + = lean right.
-        The sender decides the convention, so the invert/swap settings do not apply to it."""
-        self.ext_pitch, self.ext_roll, self.ext_time = float(pitch), float(roll), time.time()
+    def set_tilt(self, pitch, roll):
+        """Tilt in degrees relative to level: pitch + = lean forward, roll + = lean right."""
+        self.pitch, self.roll, self.tilt_time = float(pitch), float(roll), time.time()
 
-    def ext_fresh(self):
-        return time.time() - self.ext_time < 0.5
+    def tilt_fresh(self):
+        return time.time() - self.tilt_time < TILT_STALE_S
 
-    def source_ok(self):
-        return self.ext_fresh() or self.guide.imu.fresh()
+    def set_enabled(self, on):
+        if on and not self.enabled:
+            self.d = {k: 0.0 for k in CORNERS}
+        if not on and self.enabled:
+            self._hold_until = time.time() + 1.0      # land softly in the stand pose before the leader takes over
+        self.enabled = bool(on)
 
     def pose(self, hold=False):
-        g = self.guide
-        pitch, roll = (self.ext_pitch, self.ext_roll) if self.ext_fresh() else (g.pitch, g.roll)
-        p = 0.0 if hold else _dead(pitch, self.dead)    # + = lean forward (nose down)
-        r = 0.0 if hold else _dead(roll, self.dead)     # + = lean right
+        p = 0.0 if hold else _dead(self.pitch, self.dead)
+        r = 0.0 if hold else _dead(self.roll, self.dead)
         fwd, back, right, left = max(p, 0), max(-p, 0), max(r, 0), max(-r, 0)
-        goal = [fwd + right, fwd + left, back + right, back + left]   # FR, FL, BR, BL
-        for i in range(4):
-            t = min(self.max_drop, max(0.0, self.gain * goal[i]))
-            self.d[i] += self.smooth * (t - self.d[i])
-        fr, fl, br, bl = self.d
+        goal = {"FR": fwd + right, "FL": fwd + left, "BR": back + right, "BL": back + left}
         a = list(STAND)
-        a[4] = STAND[4] + br    # R3 lift, back-right
-        a[5] = STAND[5] - fr    # R4 lift, front-right
-        a[6] = STAND[6] + fl    # L4 lift, front-left
-        a[7] = STAND[7] - bl    # L3 lift, back-left
+        for k, (idx, sign) in CORNERS.items():
+            t = min(self.max_drop, max(0.0, self.gain * goal[k]))
+            self.d[k] += self.smooth * (t - self.d[k])
+            a[idx] = STAND[idx] + sign * self.d[k]
         return [int(round(min(180, max(0, v)))) for v in a]
-
-    def set_enabled(self, on, target=None):
-        if on:
-            if not target or target == "*":
-                return False
-            self.guide.set_enabled(False)          # only one mode at a time
-            self.target = target
-            self.d = [0.0] * 4
-            self.gw.command(target, "follower")    # the Pi is the leader now
-            time.sleep(0.2)
-            self.enabled = True
-        elif self.enabled:
-            self.enabled = False
-            threading.Thread(target=self._finish, daemon=True).start()
-        return True
-
-    def _finish(self):
-        """Hold the stand pose for a second (so the bot doesn't hit its failsafe), then hand the
-        bot back to normal leader mode in the stand pose."""
-        self._finishing = True
-        end = time.time() + 1.0
-        while time.time() < end:
-            self.gw.send("pose " + " ".join(map(str, STAND)))
-            time.sleep(SEND_PERIOD_S)
-        self.gw.command(self.target, "leader")
-        time.sleep(0.3)
-        self.gw.command(self.target, "seq stand")
-        self._finishing = False
 
     def _run(self):
         while True:
             time.sleep(SEND_PERIOD_S)
-            if not self.enabled:
+            if self.enabled:
+                fresh = self.tilt_fresh()
+                self.status = "streaming" if fresh else "no tilt data: holding stand"
+                self.gw.send("pose " + " ".join(map(str, self.pose(hold=not fresh))))
+            elif time.time() < self._hold_until:
+                self.status = "returning to stand"
+                self.gw.send("pose " + " ".join(map(str, STAND)))
+            else:
                 self.status = "off"
-                continue
-            fresh = self.source_ok()
-            a = self.pose(hold=not fresh)
-            self.status = ("stream (mqtt)" if self.ext_fresh() else "stream") if fresh else "tilt lost: holding stand"
-            self.last_pose = a
-            self.gw.send("pose " + " ".join(map(str, a)))

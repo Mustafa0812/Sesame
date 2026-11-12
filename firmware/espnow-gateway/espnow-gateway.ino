@@ -1,7 +1,9 @@
 /*
  * ESP-NOW <-> USB-serial gateway for the Raspberry Pi ground station.
- * ESP32-S3 SuperMini, no servos. Plug it into the Pi over USB; it relays between the
- * Pi (newline-terminated text lines at 115200) and the Sesame bots (ESP-NOW, channel 1).
+ * Any ESP32 dev board with a USB-UART chip (a WROOM-32 here; Arduino board "ESP32 Dev Module"), no servos.
+ * Plug it into the Pi over USB; it relays between the Pi (newline-terminated text lines at 115200)
+ * and the Sesame bots (ESP-NOW, channel 1). Bot replies (TLM telemetry, ACK on receipt, ERR when a
+ * command is refused) arrive as TEXT packets and are passed to the Pi unchanged as "@RX" lines.
  *
  * Pi -> gateway (one command per line):
  *   cmd <id|*> <text>      send a bot command (the same text you would type on the bot's serial,

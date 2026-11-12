@@ -1,147 +1,165 @@
-"""Sesame ground station.
+r"""Sesame ground station: controller + dashboard.
 
-    python3 app.py [/dev/ttyUSB0]          then open http://localhost:8000   (or http://<pi-ip>:8000)
+    python3 app.py [/dev/ttyUSB0]          then open http://127.0.0.1:8000  (or http://<pi-ip>:8000)
 
-Architecture (same pattern as the lab):
-    imu_publisher.py  --\
-                         >-- MQTT broker (Mosquitto) --> this controller --> ESP-NOW gateway --> bots
-    bmp388_publisher.py -/                                      |
-                                                  dashboard (SSE)  +  optional InfluxDB
+    imu_publisher.py  ---\
+                          >-- Mosquitto (MQTT) --> app.py --> USB serial --> ESP-NOW gateway --> bots
+    bmp388_publisher.py --/                          \--> dashboard (one shared 10 Hz stream)
 
-Environment: MQTT_HOST/PORT/USER/PASS/PREFIX (see mqtt_bridge.py), INFLUX_HOST (see influx_writer.py),
-             LOCAL_IMU=0 when the IMU publishes over MQTT, DEMO=1 for fake bots and sensors.
+Roles: you choose ONE leader in the dashboard; every other bot is made a follower. The choice is
+re-applied automatically if a bot reports a different role (for example after it rebooted).
+While body tilt is on, the Pi leads and every bot is a follower.
 """
 import json
 import os
+import socket
 import sys
 import threading
 import time
+from collections import deque
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 from bodytilt import BodyTilt
 from gateway import Gateway
-from guidance import Guidance
-from imu import Imu
-from store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
-STL_DIR = os.path.join(HERE, "..", "hardware", "printing", "stl")
-MODELS = {  # name used by the dashboard -> STL file (assembly-consistent parts only)
-    "frame": "Internal-Frame-v121.stl",
-    "bottom": "Bottom-Cover-v121.stl",
-    "top": "top-covers/Top-Cover-Enclosed-v117.stl",
-}
-SEQUENCES = ["rest", "stand", "wave", "dance", "swim", "point", "pushup", "bow", "cute", "freaky",
+SEQUENCES = ["stand", "rest", "wave", "dance", "swim", "point", "pushup", "bow", "cute", "freaky",
              "worm", "shake", "shrug", "dead", "crab", "forward", "backward", "left", "right"]
-DEMO = os.environ.get("DEMO") == "1"
+ROLE_RETRY_S = 3.0        # re-send a role at most this often while a bot reports the wrong one
+ENV_KEEP = 3600           # temperature/pressure samples kept (1 h at 1 Hz)
 
-store = Store()
 gw = Gateway(sys.argv[1] if len(sys.argv) > 1 else None)
-imu = Imu()
+body = BodyTilt(gw)
+leader = {"id": None}     # the bot the user chose as leader (None = not chosen yet)
+last_role_send = {}       # bot id -> time a role command was last sent
+env_hist = {"temperature": deque(maxlen=ENV_KEEP), "pressure": deque(maxlen=ENV_KEEP)}
+bridge = None
 
 
-def do_cmd(target, text):
-    """Send a whitelisted command to a bot; sequence starts are also announced to the dashboard simulator."""
-    text = str(text).strip()
-    target = str(target)
-    ok = text in ("leader", "follower", "stop", "status") or (text.startswith("seq ") and text[4:] in SEQUENCES)
-    if not ok or not (target == "*" or target.isalnum()):
-        return False
-    if text.startswith("seq "):
-        store.add_event(target, text[4:])
-    elif text == "stop":
-        store.add_event(target, "stop")
-    return gw.command(target, text)
+def on_env(name, value):
+    if name in env_hist:
+        env_hist[name].append((round(time.time(), 1), value))
 
 
-class Link:
-    """What the walking-guidance mode sees: the gateway, but sequence starts are announced to the simulator."""
-    def __getattr__(self, name):
-        return getattr(gw, name)
-
-    def command(self, target, text):
-        if text.startswith("seq "):
-            store.add_event(target, text[4:])
-        elif text == "stop":
-            store.add_event(target, "stop")
-        return gw.command(target, text)
+# ---------------------------------------------------------------- roles
+def wanted_role(bot_id):
+    if body.enabled or time.time() < body._hold_until:
+        return "F"                                   # the Pi is streaming poses: everyone follows
+    if leader["id"] is None:
+        return None
+    return "L" if bot_id == leader["id"] else "F"
 
 
-guide = Guidance(imu, Link())
-body = BodyTilt(guide, gw)
+def send_role(bot_id, role):
+    last_role_send[bot_id] = time.time()
+    gw.command(bot_id, "leader" if role == "L" else "follower", user=False)
 
 
-def current_tilt():
-    if body.ext_fresh():
-        return {"pitch": body.ext_pitch, "roll": body.ext_roll, "src": "mqtt"}
-    if imu.fresh():
-        return {"pitch": guide.pitch, "roll": guide.roll, "src": "local"}
-    return None
+def keep_roles():
+    bots = [b for b in gw.bot_list() if b["online"]]
+    if leader["id"] is None and not body.enabled:
+        leaders = [b["id"] for b in bots if b["role"] == "L"]
+        if len(leaders) == 1:                        # adopt the existing leader after a restart
+            leader["id"] = leaders[0]
+            gw.note(f"using {leaders[0]} as leader (it already reports leader)")
+    now = time.time()
+    for b in bots:
+        want = wanted_role(b["id"])
+        if b["run"] not in ("-", ""):
+            continue                                 # busy bots refuse role changes; retry when it finishes
+        if want and b["role"] != want and now - last_role_send.get(b["id"], 0) > ROLE_RETRY_S:
+            gw.note(f"{b['id']} reports {'leader' if b['role'] == 'L' else 'follower'}, setting it to "
+                    f"{'leader' if want == 'L' else 'follower'}")
+            send_role(b["id"], want)
 
 
-# ---- start the data sources
-if DEMO:
-    from demo import Demo
-    Demo(gw, body, store).start()
-else:
-    gw.start()
-    if os.environ.get("LOCAL_IMU", "1") != "0":
-        imu.start()
-    from mqtt_bridge import MqttBridge
-    bridge = MqttBridge(gw, body, guide, imu, store, do_cmd)
-    bridge.start()
-if os.environ.get("INFLUX_HOST"):
-    import influx_writer
-    influx_writer.start(store, current_tilt, gw)
+def apply_roles_now():
+    for b in gw.bot_list():
+        want = wanted_role(b["id"])
+        if want and b["online"]:
+            send_role(b["id"], want)
 
 
-def watch_runs():
-    """If a bot starts a sequence without us sending it (serial, another controller), still simulate it."""
+# ---------------------------------------------------------------- live frame (built once, shared by all tabs)
+class Hub:
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.seq, self.data = 0, "{}"
+
+    def publish(self, data):
+        with self.cv:
+            self.seq += 1
+            self.data = data
+            self.cv.notify_all()
+
+    def wait(self, seen, timeout=15):
+        with self.cv:
+            self.cv.wait_for(lambda: self.seq != seen, timeout)
+            return self.seq, self.data
+
+
+hub = Hub()
+
+
+def build_frame():
+    bots = gw.bot_list()
+    for i, b in enumerate(bots):
+        b["slot"] = "Bot " + ("AB"[i] if i < 2 else str(i + 1))
+        b["want"] = wanted_role(b["id"])
+    now = time.time()
+    env = {}
+    for k, h in env_hist.items():
+        env[k] = list(h[-1]) if h and now - h[-1][0] < 30 else None
+    log_seq, log = gw.log_view()
+    return {
+        "t": round(now, 2),
+        "gateway": gw.ser is not None,
+        "mqtt": bool(bridge and bridge.connected),
+        "tilt": {"pitch": round(body.pitch, 1), "roll": round(body.roll, 1)} if body.tilt_fresh() else None,
+        "env": env,
+        "bots": bots,
+        "leader": leader["id"],
+        "body": {"enabled": body.enabled, "status": body.status, "gain": body.gain, "max_drop": body.max_drop},
+        "cmd": gw.last_command(),
+        "log": log,
+        "log_seq": log_seq,
+    }
+
+
+def state_for_mqtt():
+    return {"leader": leader["id"], "body_tilt": body.enabled,
+            "bots": [{k: b.get(k) for k in ("id", "online", "role", "run", "volts", "pct", "rssi")} for b in gw.bot_list()]}
+
+
+def maintenance():
+    n = 0
     while True:
-        time.sleep(0.25)
-        for b in gw.snapshot()["bots"]:
-            run = (b.get("tlm") or {}).get("run", "-")
-            prev = store.last_run.get(b["mac"], "-")
-            store.last_run[b["mac"]] = run
-            if run != "-" and run != prev and b.get("id"):
-                recent = [e for e in store.events_since(0) if e["name"] == run and time.time() - e["t"] < 4]
-                if not recent:
-                    store.add_event(b["id"], run, offset_ms=1000, source="telemetry")
+        time.sleep(0.05)
+        n += 1
+        try:
+            gw.tick()                       # command re-sends (20 Hz)
+            if n % 2 == 0:
+                hub.publish(json.dumps(build_frame()))   # dashboard frame (10 Hz)
+            if n % 10 == 0:
+                keep_roles()                # 2 Hz
+        except Exception as e:          # never let the loop die
+            gw.note(f"internal error: {e!r}")
+            time.sleep(1)
 
 
-threading.Thread(target=watch_runs, daemon=True).start()
-
+# ---------------------------------------------------------------- web
 app = Flask(__name__, static_folder=STATIC, static_url_path="/static")
 
 
-def bots_payload():
-    out = []
-    for b in gw.snapshot()["bots"]:
-        t = b.get("tlm") or {}
-        if not b.get("id"):
-            continue
-        out.append({"id": b["id"], "mac": b["mac"], "online": b["online"], "age": b["age"], "rssi": b["rssi"],
-                    "role": t.get("role", "?"), "run": t.get("run", "-"), "volts": t.get("v"),
-                    "ma": t.get("ma"), "pct": t.get("pct")})
-    return sorted(out, key=lambda x: x["id"])
+def err(msg, code=400):
+    return jsonify(ok=False, error=msg), code
 
 
-def frame(last_id):
-    snap = gw.snapshot()
-    return {
-        "t": time.time(),
-        "tilt": current_tilt(),
-        "pose": list(body.last_pose) if body.enabled else None,
-        "body": {"enabled": body.enabled, "target": body.target, "status": body.status,
-                 "gain": body.gain, "max_drop": body.max_drop},
-        "walk": {"enabled": guide.enabled, "target": guide.target, "status": guide.status},
-        "bots": bots_payload(),
-        "env": {"temperature": store.metric("temperature"), "pressure": store.metric("pressure")},
-        "gateway": {"connected": snap["connected"], "ready": snap["gateway"], "stats": snap["stats"]},
-        "events": store.events_since(last_id),
-    }
+def busy_bot():
+    """A bot that is running a sequence refuses role changes, so wait for it (or STOP it) first."""
+    return next((b for b in gw.bot_list() if b["online"] and b["run"] not in ("-", "")), None)
 
 
 @app.get("/")
@@ -149,95 +167,105 @@ def index():
     return send_from_directory(STATIC, "index.html")
 
 
-@app.get("/model/<name>.stl")
-def model(name):
-    if name not in MODELS:
-        return "not found", 404
-    return send_from_directory(STL_DIR, MODELS[name])
-
-
 @app.get("/api/config")
 def config():
-    return jsonify(sequences=SEQUENCES, demo=DEMO)
+    return jsonify(sequences=SEQUENCES)
 
 
 @app.get("/api/history")
 def history():
-    return jsonify(temperature=store.history("temperature"), pressure=store.history("pressure"))
+    return jsonify({k: list(v) for k, v in env_hist.items()})
 
 
 @app.get("/api/stream")
 def stream():
     def gen():
-        last_id = store.latest_event_id()
+        seen = -1
+        yield "retry: 1500\n\n"
         while True:
-            f = frame(last_id)
-            if f["events"]:
-                last_id = f["events"][-1]["id"]
-            yield "data: " + json.dumps(f) + "\n\n"
-            time.sleep(0.05)
+            seen, data = hub.wait(seen)
+            yield f"data: {data}\n\n"
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.post("/api/cmd")
-def cmd():
-    d = request.get_json(force=True)
-    if do_cmd(d.get("target", "*"), d.get("text", "")):
-        return jsonify(ok=True)
-    return jsonify(ok=False, error="command refused or gateway not connected"), 400
-
-
-# ---- walking mode (tilt the IMU, the bot walks that way)
-@app.post("/api/imu/zero")
-def imu_zero():
-    guide.zero()
-    return jsonify(ok=True)
-
-
-@app.post("/api/imu/config")
-def imu_config():
-    d = request.get_json(force=True)
-    guide.dead = min(40.0, max(5.0, float(d.get("dead", guide.dead))))
-    guide.invert_pitch = bool(d.get("invert_pitch", guide.invert_pitch))
-    guide.invert_roll = bool(d.get("invert_roll", guide.invert_roll))
-    guide.swap = bool(d.get("swap", guide.swap))
-    return jsonify(ok=True)
-
-
-@app.post("/api/imu/enable")
-def imu_enable():
-    d = request.get_json(force=True)
-    target = str(d.get("target", ""))
-    if d.get("enabled") and not (target.isalnum() and imu.fresh()):
-        return jsonify(ok=False, error="pick a bot and make sure the local IMU is reading"), 400
-    if d.get("enabled") and body.enabled:
+@app.post("/api/leader")
+def set_leader():
+    bot_id = str((request.get_json(force=True) or {}).get("id", ""))
+    if bot_id not in {b["id"] for b in gw.bot_list()}:
+        return err("unknown bot")
+    busy = busy_bot()
+    if busy:
+        return err(f"{busy['id']} is running '{busy['run']}'. Wait for it to finish, then choose the leader.")
+    leader["id"] = bot_id
+    if body.enabled:
         body.set_enabled(False)
-    return jsonify(ok=guide.set_enabled(bool(d.get("enabled")), target))
-
-
-# ---- body-tilt mode (the bot leans the way the IMU is tilted)
-@app.post("/api/body/config")
-def body_config():
-    d = request.get_json(force=True)
-    body.gain = min(4.0, max(0.5, float(d.get("gain", body.gain))))
-    body.max_drop = min(80.0, max(10.0, float(d.get("max_drop", body.max_drop))))
+        gw.note("body tilt switched off because a leader was chosen")
+    gw.note(f"leader set to {bot_id}")
+    for b in gw.bot_list():                      # followers first, so there is never a second leader
+        if b["id"] != bot_id and b["online"]:
+            send_role(b["id"], "F")
+    send_role(bot_id, "L")
     return jsonify(ok=True)
 
 
-@app.post("/api/body/enable")
-def body_enable():
-    d = request.get_json(force=True)
-    target = str(d.get("target", ""))
-    if d.get("enabled") and not (target.isalnum() and body.source_ok()):
-        return jsonify(ok=False, error="pick a bot and make sure tilt is arriving (IMU publisher running)"), 400
-    return jsonify(ok=body.set_enabled(bool(d.get("enabled")), target))
+@app.post("/api/seq")
+def run_sequence():
+    name = str((request.get_json(force=True) or {}).get("name", ""))
+    if name not in SEQUENCES:
+        return err("unknown sequence")
+    if body.enabled:
+        return err("Body tilt is on. Switch it off to run sequences.")
+    lead = next((b for b in gw.bot_list() if b["id"] == leader["id"]), None)
+    if lead is None:
+        return err("Choose a leader first.")
+    if not lead["online"]:
+        return err(f"The leader ({lead['id']}) is offline.")
+    rec = gw.command(lead["id"], f"seq {name}")
+    return jsonify(ok=rec["state"] != "failed", id=rec["id"], error=rec.get("error", ""))
 
 
+@app.post("/api/stop")
+def stop():
+    rec = gw.command("*", "stop")
+    return jsonify(ok=rec["state"] != "failed", id=rec["id"], error=rec.get("error", ""))
+
+
+@app.post("/api/level")
+def set_level():
+    """Ask imu_publisher.py to treat the IMU's current attitude as level."""
+    if not (bridge and bridge.publish("imu/zero", "1")):
+        return err("MQTT is not connected.")
+    gw.note("asked the IMU publisher to set level")
+    return jsonify(ok=True)
+
+
+@app.post("/api/body")
+def body_cfg():
+    d = request.get_json(force=True) or {}
+    if "gain" in d:
+        body.gain = min(4.0, max(0.5, float(d["gain"])))
+    if "max_drop" in d:
+        body.max_drop = min(80.0, max(10.0, float(d["max_drop"])))
+    if "enabled" in d:
+        on = bool(d["enabled"])
+        if on and not body.tilt_fresh():
+            return err("No tilt data. Start imu_publisher.py and check MQTT.")
+        busy = busy_bot()
+        if on and busy:
+            return err(f"{busy['id']} is running '{busy['run']}'. Wait for it to finish first.")
+        body.set_enabled(on)
+        gw.note("body tilt " + ("on: all bots follow the Pi" if on else "off"))
+        if on:
+            apply_roles_now()
+        else:
+            threading.Timer(1.1, apply_roles_now).start()   # after the 1 s stand pose
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------- start
 def pick_host():
-    """Linux: listen on IPv4 and IPv6 (dual stack) so http://localhost works whichever one the browser tries
-    first. Windows sockets are IPv6-only on '::', so use plain IPv4 there."""
-    import socket
+    """Linux: listen on IPv4 + IPv6 so http://localhost works either way. Windows: plain IPv4."""
     if os.name != "nt" and socket.has_ipv6:
         try:
             s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -251,9 +279,6 @@ def pick_host():
 
 
 def port_in_use(port):
-    """True if something already accepts connections on this port (checked by connecting, which also works
-    on Windows where a second bind to a busy port can silently succeed)."""
-    import socket
     for addr in ("127.0.0.1", "::1"):
         try:
             socket.create_connection((addr, port), timeout=0.5).close()
@@ -264,10 +289,17 @@ def port_in_use(port):
 
 
 if __name__ == "__main__":
-    host, port = pick_host(), int(os.environ.get("PORT", "8000"))
-    if port_in_use(port):
-        sys.exit("\nCannot start: port %d is already in use.\n"
-                 "Another app.py is probably still running. Stop it (Ctrl+C in its terminal, or "
-                 "'pkill -f app.py') or use another port: PORT=8001 python3 app.py\n" % port)
-    print("\nSesame ground station: open http://127.0.0.1:%d  (or http://<this-device-ip>:%d)\n" % (port, port))
-    app.run(host=host, port=port, threaded=True)
+    port = int(os.environ.get("PORT", "8000"))
+    if port_in_use(port):        # checked before touching the serial port, so a second copy changes nothing
+        sys.exit(f"\nCannot start: port {port} is already in use - app.py is probably already running.\n"
+                 f"Stop the other one (Ctrl+C in its terminal, or: pkill -f app.py) or use PORT=8001.\n")
+    gw.start()
+    try:
+        from mqtt_bridge import MqttBridge
+        bridge = MqttBridge(body.set_tilt, on_env, state_for_mqtt)
+        bridge.start()
+    except ImportError:
+        print("paho-mqtt not installed: no tilt / BMP388 data (pip install paho-mqtt)")
+    threading.Thread(target=maintenance, daemon=True).start()
+    print(f"\nSesame ground station: open http://127.0.0.1:{port}  (or http://<this-pi-ip>:{port})\n")
+    app.run(host=pick_host(), port=port, threaded=True)

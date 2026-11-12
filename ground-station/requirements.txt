@@ -1,7 +1,5 @@
 pyserial>=3.5
 flask>=3.0
-smbus2>=0.4
 paho-mqtt>=2.0
-# optional
-# influxdb>=5.3                          InfluxDB 1.x logging (set INFLUX_HOST)
-# adafruit-circuitpython-bmp3xx>=1.3     only on the device that has the BMP388
+smbus2>=0.4                          # imu_publisher.py (MPU6500)
+adafruit-circuitpython-bmp3xx>=1.3   # bmp388_publisher.py (BMP388)

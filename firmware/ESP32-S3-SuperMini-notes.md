@@ -1,5 +1,9 @@
 # ESP32-S3 SuperMini: Sesame Port Notes
 
+> **2026-11-12:** the old tester sketches named below now live in `firmware/archive/`. The bots run
+> `espnow-sequence-tester-pca`, the gateway runs `espnow-gateway`; see `firmware/README.md`.
+
+
 Living notes for running the Sesame firmware on the ESP32-S3 SuperMini board
 (Ulegqin, pack of 3). Updated as we learn more.
 

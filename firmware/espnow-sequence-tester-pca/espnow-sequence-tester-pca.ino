@@ -39,6 +39,7 @@
 
 #include <WiFi.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "espnow-comms.h"
@@ -231,6 +232,7 @@ int rawAngle[NUM_SERVOS] = {-1, -1, -1, -1, -1, -1, -1, -1};   // last 'raw'/'jo
 
 Role role = ROLE_FOLLOWER;
 bool sequenceRunning = false;
+String runningName = "";                     // sequence in progress, for telemetry (stays set until it really ends)
 
 // leader state
 uint8_t cmdAngle[NUM_SERVOS];
@@ -310,9 +312,17 @@ void handlePose8(const EspNowRxMsg& m) {
   if (failsafeTripped) { failsafeTripped = false; Serial.println("Leader back, resumed"); }
 }
 
-// Remote commands from the Pi gateway: TEXT payload "CMD:<id|*>:<command>". The command is only
+// Remote commands from the Pi gateway: TEXT payload "CMD:<id|*>:<command>". Commands are only
 // queued here (we are inside espnowService) and run from serviceAll(), the same path as serial input.
-String pendingRemoteCmd = "";
+// The queue keeps their order (e.g. "seq wave" then "stop"); when it is full the oldest is dropped.
+const int RCMD_SLOTS = 4;
+String remoteCmds[RCMD_SLOTS];
+int rcmdHead = 0, rcmdCount = 0;
+void queueRemoteCmd(const String& c) {
+  if (rcmdCount == RCMD_SLOTS) { rcmdHead = (rcmdHead + 1) % RCMD_SLOTS; rcmdCount--; }
+  remoteCmds[(rcmdHead + rcmdCount) % RCMD_SLOTS] = c;
+  rcmdCount++;
+}
 
 void onMessage(const EspNowRxMsg& m) {
   if (m.hdr.type == ESPNOW_MSG_POSE8) handlePose8(m);
@@ -324,23 +334,49 @@ void onMessage(const EspNowRxMsg& m) {
     if (c <= 0) return;
     String id = s.substring(0, c);
     if (id != "*" && !id.equalsIgnoreCase(boardId)) return;   // not for this board
-    pendingRemoteCmd = s.substring(c + 1);
+    queueRemoteCmd(s.substring(c + 1));
   }
 }
 
-// Status line for the Pi: TLM:<id>:role=L|F;run=<sequence or ->;v=<V>;ma=<mA>;pct=<%>
+// Status line for the Pi, every second and right after a role change or sequence start/end:
+//   TLM:<id>:role=L|F;run=<sequence or ->;v=<V>;ma=<mA>;pct=<%>;up=<uptime s>;rst=<reset reason at boot>
+// 'up' lets the ground station notice a reboot; 'rst' says why (e.g. brownout = the supply dipped).
 unsigned long lastTlmMs = 0;
+bool tlmNow = false;
+const char* resetReason = "unknown";
+void requestTelemetry() { tlmNow = true; }
 void sendTelemetry() {
   unsigned long now = millis();
-  if (now - lastTlmMs < 2000) return;
+  if (!tlmNow && now - lastTlmMs < 1000) return;
+  tlmNow = false;
   lastTlmMs = now;
-  char buf[120];
-  snprintf(buf, sizeof(buf), "TLM:%s:role=%c;run=%s;v=%.2f;ma=%.0f;pct=%d",
+  char buf[150];
+  snprintf(buf, sizeof(buf), "TLM:%s:role=%c;run=%s;v=%.2f;ma=%.0f;pct=%d;up=%lu;rst=%s",
            boardId.c_str(), role == ROLE_LEADER ? 'L' : 'F',
-           currentCommand.length() ? currentCommand.c_str() : "-",
+           sequenceRunning ? (runningName.length() ? runningName.c_str() : "busy") : "-",
            battInaOk ? battBusV : 0.0f, battInaOk ? battCurrentMa : 0.0f,
-           (battInaOk && battHaveFilter && !battStale) ? battPercent : -1);
+           (battInaOk && battHaveFilter && !battStale) ? battPercent : -1,
+           now / 1000UL, resetReason);
   espnowSendText(String(buf));
+}
+
+// The role survives reboots (kept in flash), so a brownout or reset no longer turns a leader into a follower.
+Preferences prefs;
+void saveRole() { prefs.putUChar("role", role == ROLE_LEADER ? 1 : 0); }
+
+const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "external";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "crash";
+    case ESP_RST_INT_WDT:   return "int-watchdog";
+    case ESP_RST_TASK_WDT:  return "task-watchdog";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    default:                return "unknown";
+  }
 }
 
 // ---------------------------------------------------------------- leader / follower services
@@ -410,11 +446,21 @@ void serviceAll() {
   updateOled();
   pollSerial();
   sendTelemetry();
-  if (pendingRemoteCmd.length()) {
-    String c = pendingRemoteCmd;
-    pendingRemoteCmd = "";
-    espnowSendText("ACK:" + boardId + ":" + c);
-    handleCommand(c);
+  if (rcmdCount) {
+    String c = remoteCmds[rcmdHead];
+    rcmdHead = (rcmdHead + 1) % RCMD_SLOTS;
+    rcmdCount--;
+    espnowSendText("ACK:" + boardId + ":" + c);           // received
+    String lc = c;
+    lc.trim();
+    lc.toLowerCase();
+    if (sequenceRunning && lc != "stop") {                // refused: tell the Pi why (ERR:<id>:<cmd>:<reason>)
+      espnowSendText("ERR:" + boardId + ":" + c + ":busy running " + (runningName.length() ? runningName : String("a sequence")));
+    } else if (lc.startsWith("seq ") && role != ROLE_LEADER) {
+      espnowSendText("ERR:" + boardId + ":" + c + ":not the leader");
+    } else {
+      handleCommand(c);
+    }
   }
 }
 
@@ -425,6 +471,8 @@ void runSequence(const String& name) {
   bool found = true;
   sequenceRunning = true;
   currentCommand = name;
+  runningName = name;
+  requestTelemetry();                 // the dashboard shows "running <name>" right away
   if      (name == "rest")     runRestPose();
   else if (name == "stand")    runStandPose(1);
   else if (name == "wave")     runWavePose();
@@ -449,6 +497,8 @@ void runSequence(const String& name) {
   else found = false;
   sequenceRunning = false;
   currentCommand = "";
+  runningName = "";
+  requestTelemetry();
 
   if (found) Serial.println("Sequence done");
   else Serial.println("Unknown sequence. Names: rest stand wave dance swim point pushup bow cute freaky worm shake shrug dead crab forward backward left right");
@@ -629,15 +679,23 @@ void handleCommand(String cmd) {
                   (unsigned long)poseStale, slewStep, txPowerDbm);
   }
   else if (cmd == "leader") {
-    role = ROLE_LEADER;
-    for (int i = 0; i < NUM_SERVOS; i++) cmdAngle[i] = (uint8_t)lroundf(curAngle[i]);
+    if (role != ROLE_LEADER) {          // only on a change: a repeated 'leader' must not reset the stream
+      role = ROLE_LEADER;
+      for (int i = 0; i < NUM_SERVOS; i++) cmdAngle[i] = (uint8_t)lroundf(curAngle[i]);
+      saveRole();
+    }
+    requestTelemetry();
     Serial.println("Role: LEADER");
   }
   else if (cmd == "follower") {
-    role = ROLE_FOLLOWER;
-    gotAnyPose = false;
-    failsafeTripped = false;
-    for (int i = 0; i < NUM_SERVOS; i++) { curAngle[i] = cmdAngle[i]; tgtAngle[i] = cmdAngle[i]; }
+    if (role != ROLE_FOLLOWER) {        // only on a change: a repeated 'follower' must not move the servos
+      role = ROLE_FOLLOWER;
+      gotAnyPose = false;
+      failsafeTripped = false;
+      for (int i = 0; i < NUM_SERVOS; i++) { curAngle[i] = cmdAngle[i]; tgtAngle[i] = cmdAngle[i]; }
+      saveRole();
+    }
+    requestTelemetry();
     Serial.println("Role: FOLLOWER");
   }
   else if (cmd.startsWith("raw ")) {
@@ -741,6 +799,10 @@ void setup() {
   }
   Serial.println("\n=== ESP-NOW sequence tester (8 servos) ===");
   Serial.println("Board ID " + boardId + " (type 'status' to see the full MAC)");
+  resetReason = resetReasonName(esp_reset_reason());
+  Serial.printf("Reset reason: %s\n", resetReason);
+  prefs.begin("sesame", false);
+  role = prefs.getUChar("role", 0) == 1 ? ROLE_LEADER : ROLE_FOLLOWER;   // last role, kept across reboots
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
@@ -775,7 +837,8 @@ void setup() {
   for (int i = 0; i < NUM_SERVOS; i++) {
     Serial.printf("  %d  %s  CH %d\n", i, ServoNames[i].c_str(), servoChannels[i]);
   }
-  Serial.printf("Role: FOLLOWER (type 'leader' on the board that should lead) | TX %d dBm\n", txPowerDbm);
+  Serial.printf("Role: %s (restored from flash; 'leader' / 'follower' to change) | TX %d dBm\n",
+                role == ROLE_LEADER ? "LEADER" : "FOLLOWER", txPowerDbm);
   printHelp();
 }
 

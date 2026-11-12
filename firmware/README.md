@@ -1,5 +1,18 @@
 # Sesame Robot Firmware
 
+## This fork: what to flash
+
+| Board | Sketch |
+|---|---|
+| Both bots (ESP32-S3 SuperMini + PCA9685, INA260 at 0x41, OLED) | [`espnow-sequence-tester-pca/`](espnow-sequence-tester-pca/) |
+| Gateway (ESP32 WROOM-32 dev board on the Pi's USB) | [`espnow-gateway/`](espnow-gateway/) |
+
+The Raspberry Pi side is in [`../ground-station`](../ground-station/README.md). Old bench testers are in
+[`archive/`](archive/README.md). The rest of this document describes the original single-robot web firmware
+(`sesame-firmware-main`), which this two-bot setup does not use.
+
+---
+
 This document provides technical information on the firmware architecture, control logic, and hardware abstraction layers used in the Sesame Robot.
 
 > [!NOTE]
