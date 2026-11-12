@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sesame Ground Station</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">S</span><div><h1>Sesame Ground Station</h1><p id="subtitle">Connecting…</p></div></div>
+  <div class="chips">
+    <span class="chip" id="chipGateway"><i></i>Gateway</span>
+    <span class="chip" id="chipTilt"><i></i>IMU</span>
+    <span class="chip" id="chipEnv"><i></i>BMP388</span>
+    <span class="chip" id="chipLink"><i></i>Live</span>
+    <button class="icon-btn" id="themeBtn" title="Toggle light / dark">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============ ROBOTS ============ -->
+  <section class="card span-12" id="fleet">
+    <div class="card-head">
+      <div>
+        <h2>Robots</h2>
+        <p class="muted">Live simulation of each bot. Sequences are replayed from the firmware's own timings.</p>
+      </div>
+      <div class="fleet-tags" id="fleetTags"></div>
+    </div>
+    <div class="bots" id="bots"></div>
+    <div class="fleet-actions">
+      <button class="btn" id="swapRoles">⇄ Swap leader / follower</button>
+      <label class="muted small">Model front
+        <select id="modelRot"><option value="0">0°</option><option value="1">90°</option><option value="2">180°</option><option value="3">270°</option></select>
+      </label>
+    </div>
+  </section>
+
+  <!-- ============ CONTROLS ============ -->
+  <section class="card span-7" id="controls">
+    <div class="card-head"><h2>Sequences</h2>
+      <div class="seg" id="targetSeg" role="tablist" aria-label="Command target"></div>
+    </div>
+    <div class="seq-grid" id="seqGrid"></div>
+    <div class="row">
+      <button class="btn danger" id="stopBtn">■ STOP</button>
+      <p class="muted small" id="targetHint">Sequences run on the leader; the follower mirrors it.</p>
+    </div>
+  </section>
+
+  <section class="card span-5" id="tiltCard">
+    <div class="card-head"><h2>Body tilt</h2><label class="switch"><input type="checkbox" id="bodySwitch"><span></span></label></div>
+    <p class="muted small">The bot leans the way the IMU is tilted. The Pi streams the pose and puts the bot in follower mode.</p>
+    <div class="field"><label for="bodyTarget">Bot</label><select id="bodyTarget"></select></div>
+    <div class="field"><label>Gain <b id="gainV">1.5</b></label><input type="range" id="gain" min="5" max="40" value="15"></div>
+    <div class="field"><label>Max drop <b id="maxV">60</b>°</label><input type="range" id="maxDrop" min="10" max="80" value="60"></div>
+    <p class="status" id="bodyStatus">Off</p>
+  </section>
+
+  <!-- ============ IMU 3D ============ -->
+  <section class="card span-7">
+    <div class="card-head"><h2>IMU orientation</h2><div class="readout"><span>Pitch <b id="pitchV">–</b></span><span>Roll <b id="rollV">–</b></span></div></div>
+    <div class="viewport tall" id="imuView"></div>
+    <p class="muted small">Box = IMU attitude. The trail is the path of the gravity vector tip on a sphere (centre ring = level).</p>
+  </section>
+
+  <section class="card span-5">
+    <div class="card-head"><h2>Tilt history</h2><span class="muted small">last 30 s</span></div>
+    <div class="chart-box"><canvas id="imuChart"></canvas></div>
+    <details class="walk">
+      <summary>Walk mode (local IMU)</summary>
+      <p class="muted small">Tilt to make the bot walk that way. Needs the IMU wired to this Pi.</p>
+      <div class="field"><label for="walkTarget">Bot</label><select id="walkTarget"></select></div>
+      <div class="field"><label>Dead zone <b id="deadV">15</b>°</label><input type="range" id="dead" min="5" max="40" value="15"></div>
+      <div class="checks">
+        <label><input type="checkbox" id="invP"> invert fwd/back</label>
+        <label><input type="checkbox" id="invR"> invert left/right</label>
+        <label><input type="checkbox" id="swapA"> swap axes</label>
+      </div>
+      <div class="row"><button class="btn" id="zeroBtn">Set level</button><button class="btn primary" id="walkBtn">Enable walk mode</button></div>
+      <p class="status" id="walkStatus">Off</p>
+    </details>
+  </section>
+
+  <!-- ============ ENVIRONMENT ============ -->
+  <section class="card span-6">
+    <div class="card-head"><h2>Temperature</h2><div class="big" id="tempV">–<small>°C</small></div></div>
+    <div class="chart-box"><canvas id="tempChart"></canvas></div>
+  </section>
+  <section class="card span-6">
+    <div class="card-head"><h2>Pressure</h2><div class="big" id="presV">–<small>hPa</small></div></div>
+    <div class="chart-box"><canvas id="presChart"></canvas></div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status"></div>
+
+<script src="/static/vendor/three.min.js"></script>
+<script src="/static/vendor/STLLoader.js"></script>
+<script src="/static/vendor/OrbitControls.js"></script>
+<script src="/static/vendor/chart.umd.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

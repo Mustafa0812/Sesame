@@ -37,6 +37,7 @@ class BodyTilt:
         self.ext_pitch = 0.0   # tilt received from elsewhere (MQTT); wins over the local IMU while fresh
         self.ext_roll = 0.0
         self.ext_time = 0.0
+        self.last_pose = list(STAND)   # what is being streamed, for the dashboard simulator
         threading.Thread(target=self._run, daemon=True).start()
 
     def set_external(self, pitch, roll):
@@ -105,4 +106,5 @@ class BodyTilt:
             fresh = self.source_ok()
             a = self.pose(hold=not fresh)
             self.status = ("stream (mqtt)" if self.ext_fresh() else "stream") if fresh else "tilt lost: holding stand"
+            self.last_pose = a
             self.gw.send("pose " + " ".join(map(str, a)))
