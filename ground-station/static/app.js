@@ -351,15 +351,7 @@ function updateControls(f) {
 
 /* ---------- frame handler */
 let lastImuChart = 0;
-function bootError(msg) {
-  const b = $('boot'); if (!b || b.classList.contains('done')) return;
-  b.classList.add('error'); b.querySelector('b').textContent = 'The dashboard could not start';
-  $('bootMsg').textContent = msg;
-}
-window.addEventListener('error', e => bootError('Script error: ' + e.message));
-window.addEventListener('unhandledrejection', e => bootError('Failed: ' + (e.reason && e.reason.message || e.reason)));
-setTimeout(() => bootError('No data from the server after 8 s. Check that app.py is running in its terminal and has no error, ' +
-  'that nothing else is using this port, and try http://127.0.0.1:8000 instead of localhost.'), 8000);
+function bootError(msg) { if (window.__boot) window.__boot(msg, 1); }
 
 function onFrame(f) {
   $('boot').classList.add('done');
@@ -455,11 +447,13 @@ function buildSequences() {
 }
 
 async function init() {
+  if (window.__boot) __boot('Step 3/4: fetching sequences and history…');
   const [cfg, seqs, hist] = await Promise.all([
     fetch('/api/config').then(r => r.json()), fetch('/static/data/sequences.json').then(r => r.json()), fetch('/api/history').then(r => r.json()).catch(() => ({})),
   ]);
   state.sequences = cfg.sequences; state.demo = cfg.demo; state.timelines = seqs.sequences;
   state.env.temperature = hist.temperature || []; state.env.pressure = hist.pressure || [];
+  if (window.__boot) __boot('Step 4/4: building the 3D views, waiting for live data from the server…');
   buildPanels(); buildSequences(); wire();
   try { imuView = new ImuView($('imuView')); } catch (e) { $('imuView').innerHTML = '<div class="placeholder">3D view needs WebGL</div>'; }
 

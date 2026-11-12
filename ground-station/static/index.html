@@ -97,10 +97,31 @@
 <div class="toast" id="toast" role="status"></div>
 <div id="boot"><div><b>Loading dashboard…</b><p id="bootMsg" class="muted small">Waiting for the first data from the server.</p></div></div>
 
+<script>
+/* Boot diagnostics: runs before everything else so a failure always shows up in the overlay. */
+window.__boot = function (msg, isError) {
+  var b = document.getElementById('boot'), p = document.getElementById('bootMsg');
+  if (!b || b.classList.contains('done')) return;
+  p.textContent = msg;
+  if (isError) { b.classList.add('error'); b.querySelector('b').textContent = 'The dashboard could not start'; }
+};
+window.addEventListener('error', function (e) {
+  var t = e.target || {};
+  if (t.src || t.href) __boot('Could not load ' + (t.src || t.href) + '. Is the whole ground-station/static folder on this device (including static/vendor)?', 1);
+  else __boot('Script error: ' + e.message + ' (' + String(e.filename || '').split('/').pop() + ':' + e.lineno + ')', 1);
+}, true);
+window.addEventListener('unhandledrejection', function (e) { __boot('Failed: ' + ((e.reason && e.reason.message) || e.reason), 1); });
+setTimeout(function () { __boot('Still no data after 10 s. Check the terminal running app.py for errors, then try http://127.0.0.1:8000 instead of localhost.', 1); }, 10000);
+__boot('Step 1/4: page loaded, loading libraries…');
+</script>
 <script src="/static/vendor/three.min.js"></script>
 <script src="/static/vendor/STLLoader.js"></script>
 <script src="/static/vendor/OrbitControls.js"></script>
 <script src="/static/vendor/chart.umd.min.js"></script>
+<script>
+if (typeof THREE === 'undefined' || typeof Chart === 'undefined') __boot('Libraries did not load (three.js / Chart.js missing). Copy the complete ground-station/static/vendor folder to this device.', 1);
+else __boot('Step 2/4: libraries ready, starting dashboard…');
+</script>
 <script src="/static/app.js"></script>
 </body>
 </html>
