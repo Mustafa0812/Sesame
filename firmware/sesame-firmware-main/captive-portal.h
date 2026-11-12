@@ -510,19 +510,19 @@ const char index_html[] PROGMEM = R"rawliteral(
             <input type="range" id="motor4" min="0" max="180" value="90" oninput="updateMotor(4, this.value)">
           </div>
           <div class="motor-slider">
-            <label><span>S4 R4</span><span id="m5val">90&deg;</span></label>
+            <label><span>S4 R3</span><span id="m5val">90&deg;</span></label>
             <input type="range" id="motor5" min="0" max="180" value="90" oninput="updateMotor(5, this.value)">
           </div>
           <div class="motor-slider">
-            <label><span>S5 R3</span><span id="m6val">90&deg;</span></label>
+            <label><span>S5 R4</span><span id="m6val">90&deg;</span></label>
             <input type="range" id="motor6" min="0" max="180" value="90" oninput="updateMotor(6, this.value)">
           </div>
           <div class="motor-slider">
-            <label><span>S6 L3</span><span id="m7val">90&deg;</span></label>
+            <label><span>S6 L4</span><span id="m7val">90&deg;</span></label>
             <input type="range" id="motor7" min="0" max="180" value="90" oninput="updateMotor(7, this.value)">
           </div>
           <div class="motor-slider">
-            <label><span>S7 L4</span><span id="m8val">90&deg;</span></label>
+            <label><span>S7 L3</span><span id="m8val">90&deg;</span></label>
             <input type="range" id="motor8" min="0" max="180" value="90" oninput="updateMotor(8, this.value)">
           </div>
         </div>

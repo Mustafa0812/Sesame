@@ -55,7 +55,8 @@
 // ---------- Hardware ----------
 #define I2C_SDA 6
 #define I2C_SCL 11
-const int servoPins[8] = {4, 5, 1, 7, 10, 2, 12, 13};
+// L1 and L2 (indexes 2 and 3) swapped vs. the original S3 map {4, 5, 1, 7, ...}: swapped in assembly.
+const int servoPins[8] = {4, 5, 7, 1, 10, 2, 12, 13};
 const int MIN_PULSE = 732;    // us at 0 degrees (same as the main firmware)
 const int MAX_PULSE = 2929;   // us at 180 degrees
 

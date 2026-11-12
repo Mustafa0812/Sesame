@@ -109,7 +109,7 @@ Edits to `sesame-firmware-main.ino`:
 |---|---|---|
 | `I2C_SDA` | 33 | **6** |
 | `I2C_SCL` | 35 | **11** |
-| `servoPins[8]` | `{1, 2, 4, 6, 8, 10, 13, 14}` | **`{4, 5, 1, 7, 10, 2, 12, 13}`** |
+| `servoPins[8]` | `{1, 2, 4, 6, 8, 10, 13, 14}` | **`{4, 5, 1, 7, 10, 2, 12, 13}`** (L1/L2 swapped after assembly, 2026-11-08: now **`{4, 5, 7, 1, 10, 2, 12, 13}`**) |
 
 History: first proposed SDA 9 / SCL 18 (vendor pinout), then 9 / 8 (corrected
 pinout), but the I2C scan found nothing. `i2c-pin-finder` showed the MPU6050
@@ -181,7 +181,7 @@ no servos or OLED. Commands: `s` I2C scan, `c` gyro calibrate, `p` pause,
 
 ### IMU + servo tester
 `firmware/imu-servo-tester/imu-servo-tester.ino`: IMU and servos together
-(SDA 6, SCL 11, servos `{4, 5, 1, 7, 10, 2, 12, 13}`). Servos start limp.
+(SDA 6, SCL 11, servos `{4, 5, 7, 1, 10, 2, 12, 13}`, L1/L2 swapped after assembly). Servos start limp.
 Commands: `<id> <angle>`, `all <angle>`, `sweep <id>`, `tilt <a> <b>` (servo a
 follows roll, b follows pitch), `gain`, `flip`, `stop`, `imu cal`, `p`, `h`.
 The status line shows IMU read errors, so I2C trouble while servos run
@@ -213,6 +213,51 @@ Disconnect servos before running. `r` reruns, `f` forces a scan of all pins.
   radio off channel 1 and breaks ESP-NOW with the other bot.
 - If the OLED is missing the firmware still halts at boot (unchanged behaviour).
 - Relative links to the moved headers in `firmware/README.md` are now broken.
+
+### Battery level on the OLED (INA260), added 2026-11-08 (TEST ONLY, not in the main firmware)
+`espnow-sequence-tester/battery.h`, used by `espnow-sequence-tester.ino` (its own battery screen on the
+OLED). It was first wired into `sesame-firmware-main` and then removed again; `battery.h` still has an
+overlay drawing function (`batteryDrawOverlay`) for putting the icon on the face if it goes back in.
+Not yet compiled or tested on hardware.
+- **Wiring:** INA260 on the BATTERY side, before the buck converter: battery + -> IN+, IN- -> buck
+  input +, grounds common. INA260 on the shared I2C bus (SDA 6, SCL 11, address 0x40). After the buck
+  it would only see 5.1 V and could not show a battery level.
+- **Pack assumed:** 2S Li-ion (2x 14500), 8.4 V full. Change `BATT_CELLS` and the `BATT_CURVE` table
+  for other packs.
+- **Method:** voltage + I * R_internal (load compensation, `BATT_DEFAULT_MOHM` = 200 is a guess),
+  6 s low-pass filter, per-cell Li-ion lookup. Voltage-only estimate, no coulomb counting.
+- **Display (tester):** big percent, volts, mA, peak mA, per-cell volts, internal resistance and a level
+  bar ("LOW!" at or below 15%, "--" if the INA260 stops answering). Refreshed every 500 ms.
+- **Serial:** `batt` prints volts/amps/percent/peak; `batt r <mohm>` sets the internal resistance
+  (use `batt r 0` on a bench supply); `batt peak` resets the peak current.
+- **Tune R:** (V_idle - V_load) / (I_load - I_idle) while a servo-heavy move runs.
+
+## 6b. Servo calibration and bench status (2026-11-08)
+
+**Sketch:** `espnow-sequence-tester/espnow-sequence-tester.ino` (two 8-servo bots, leader streams poses to follower). Not yet compiled/verified after the latest edits.
+
+**Calibration model.** Sequences use logical angles (90 = rest). Just before the servo, `calibratedAngle()` converts:
+`physical = CAL_REST[i] + CAL_DIR[i] * (logical - 90)`, clamped 0..180. Same table on leader and follower; the stream carries logical angles.
+
+| Servo | GPIO | CAL_REST | CAL_DIR | stand (physical) |
+|---|---|---|---|---|
+| R1 | 4 | 7 | +1 | 52 |
+| R2 | 5 | 56 (horn remounted; was 11) | +1 | 11 |
+| L1 | 7 | 87 | +1 | 45 |
+| L2 | 1 | 0 | +1 | 45 |
+| R4, R3, L3, L4 | 10, 2, 12, 13 | 90 (uncalibrated) | +1 | - |
+
+- L1/L2 GPIOs were swapped after assembly: pin map is `{4, 5, 7, 1, 10, 2, 12, 13}` (main firmware, sequence tester, imu-servo-tester). Calibration values follow the servo, not the name: the servo that measured 87 is on GPIO 7 (L1), the one that measured 0 is on GPIO 1 (L2). Assumption, re-check with `move L1 90` / `move L2 90`.
+- R2 originally rested at 11, leaving only 11 deg of downward travel (stand needs 45). Angle 56 crashed into the body, 160 did not move. Fixed by remounting the horn so straight = 56.
+- Legs R4/R3/L3/L4 still need rest angles. Use `raw <servo> <angle>` (physical, uncalibrated, this board only) to find them, then fill `CAL_REST`.
+- Hobby servos have no position feedback: code only knows the commanded angle. The `angles` command was tried and reverted.
+- `move` takes logical angles, `raw` takes physical ones (`move r2 90` = `raw r2 56`).
+- `sesame-firmware-main.ino` is NOT ported yet: still ESP32Servo, flat `servoSubtrim` only (cannot flip a joint), no TX power setting. Planned: LEDC driver, 14 dBm, calibration table.
+- Optional, not done: per-servo min/max physical limits to protect against body collisions.
+
+**Tester commands added:** `batt`, `batt r <mohm>`, `batt peak`, `raw <servo> <angle>`. OLED shows board ID, role, battery screen. Boot banner prints Board ID (last 2 MAC bytes) to tell the two boards apart; both serial windows once appeared to follow the same board (check MAC with `status`).
+
+**Open issues:** wave pose on follower's L3 looked odd (not diagnosed; try `sweep L3`, check `pose rx`); periodic ping loss; one watchdog reset on board 2.
 
 ## 7. Parked ideas (two-bot behaviours)
 - Fall detection using the IMU, alert sent to the other bot over ESP-NOW.

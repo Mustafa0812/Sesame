@@ -127,7 +127,8 @@ Servo servos[8];
 // Same as Distro Board V3 except servo 2 (was 6) and servo 5 (was 11), because
 // GPIO6 and GPIO11 are the I2C pins here. Those two moved to the spare pins 1 and 2.
 // Avoids strapping pin 3, UART (43, 44) and I2C (6, 11).
-const int servoPins[8] = {4, 5, 1, 7, 10, 2, 12, 13};
+// L1 and L2 (indexes 2 and 3) are swapped vs. the original S3 map {4, 5, 1, 7, ...}: the two joints were swapped in assembly.
+const int servoPins[8] = {4, 5, 7, 1, 10, 2, 12, 13};
 
 // Subtrim values for each servo (offset in degrees)
 int8_t servoSubtrim[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -1199,7 +1200,7 @@ void updateWifiInfoScroll() {
     display.setCursor(-wifiScrollPos, 1);
     display.print(wifiInfoText);
     display.setTextWrap(true);
-    
+
     display.display();
     
     // Advance scroll position
