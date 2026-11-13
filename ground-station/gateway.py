@@ -1,7 +1,8 @@
 """Serial link to the ESP-NOW gateway (firmware/espnow-gateway) and the table of bots it hears.
 
-ESP-NOW broadcasts can be lost, so every command is re-sent until each target bot answers
-"ACK:<id>:<command>" (bots send it the moment they receive a command), up to RETRIES sends.
+ESP-NOW broadcasts can be lost, so every command is re-sent until each target bot answers, up to RETRIES
+sends. A bot answers each command exactly once: "ACK:<id>:<command>" (accepted) or
+"ERR:<id>:<command>:<reason>" (refused). It recognises a re-send and repeats its answer without running it again.
 
 Gateway -> Pi lines all start with '@':  @READY, @HB <mac> <rssi> <name>, @RX <mac> <rssi> <text>, @OK, @ERR ...
 Pi -> gateway:                           cmd <id|*> <text>,  pose a0..a7
@@ -32,7 +33,7 @@ class Gateway:
         self.fixed_port, self.port, self.baud = port, None, baud
         self.ser = None
         self.ready = ""
-        self.lock = threading.Lock()         # bots, pending commands, log
+        self.lock = threading.RLock()        # bots, pending commands, log (re-entrant: sends happen under it)
         self.write_lock = threading.Lock()   # serial writes
         self.bots = {}                       # board id -> state dict
         self.macs = {}                       # MAC -> board id
@@ -47,11 +48,15 @@ class Gateway:
         threading.Thread(target=self._reader, daemon=True).start()
 
     def _reader(self):
+        last_err = ""
         while True:
+            s = None
             try:
                 self.port = self.fixed_port or find_port()
                 if self.port is None:
-                    self.note("no gateway on USB (/dev/ttyUSB*, /dev/ttyACM*), retrying")
+                    if last_err != "none":
+                        self.note("no gateway on USB (/dev/ttyUSB*, /dev/ttyACM*), retrying")
+                        last_err = "none"
                     time.sleep(3)
                     continue
                 # CP2102/CH340 boards (WROOM-32) reset the ESP32 when DTR/RTS toggle on open: hold both low.
@@ -61,15 +66,30 @@ class Gateway:
                 s.rts = False
                 s.open()
                 self.ser = s
+                last_err = ""
                 self.note(f"gateway connected on {self.port}")
                 while True:
                     raw = s.readline()
-                    if raw:
-                        self._parse(raw.decode("utf-8", "replace").strip())
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8", "replace").strip()
+                    try:
+                        self._parse(line)
+                    except Exception as e:          # e.g. a line cut short by a gateway reset: skip it
+                        self.note(f"skipped a garbled gateway line ({e!r}): {line[:80]}")
             except (serial.SerialException, OSError) as e:
                 if self.ser is not None:
                     self.note(f"gateway disconnected: {e}")
+                elif str(e) != last_err:             # could not open: say why, once
+                    hint = " (add yourself to the dialout group)" if "ermission" in str(e) else ""
+                    self.note(f"cannot open {self.port}: {e}{hint}")
+                last_err = str(e)
                 self.ser = None
+                try:
+                    if s is not None:
+                        s.close()                    # free the device so a replugged gateway gets the same name
+                except Exception:
+                    pass
                 time.sleep(2)
 
     def send(self, line):
@@ -93,42 +113,43 @@ class Gateway:
                 need = {b["id"] for b in self.bots.values() if now - b["seen"] < OFFLINE_S}
             else:
                 need = {target}
+            kind = "role" if text in ("leader", "follower") else ("user" if user else "other")
             rec = {"id": self._next_id, "target": target, "text": text, "need": need, "acked": {},
-                   "t0": now, "last": now, "tries": 1, "state": "sent", "user": user}
+                   "t0": now, "last": now, "tries": 1, "state": "sent", "user": user, "kind": kind}
             self._next_id += 1
-            if user:   # a newer command replaces older unanswered ones, so a late re-send can't run after it
+            # A newer command replaces older unanswered ones of the same kind (user commands, or role
+            # commands), so a late re-send can never run after it (e.g. 'seq wave' after STOP).
+            if kind != "other":
                 for r in self.pending:
-                    if r["user"] and r["state"] == "sent" and (r["target"] == target or "*" in (r["target"], target)):
+                    if r["kind"] == kind and r["state"] == "sent" and (r["target"] == target or "*" in (r["target"], target)):
                         r["state"] = "superseded"
             self.pending.append(rec)
             if user:
                 self.last_cmd = rec
-        if not self.send(f"cmd {target} {text}"):
-            rec["state"] = "failed"
-            rec["error"] = "gateway not connected"
-            self.note(f"✗ '{text}' to {target}: gateway not connected")
+            ok = self.send(f"cmd {target} {text}")   # under the lock, so the wire order matches the supersede order
+            if not ok:
+                rec["state"] = "failed"
+                rec["error"] = "gateway not connected"
+                self._note(f"✗ '{text}' to {target}: gateway not connected")
         return rec
 
     def tick(self):
         """Call every ~50 ms: re-sends commands that have not been ACKed yet."""
         now = time.time()
-        resend = []
-        with self.lock:
+        with self.lock:   # re-send under the lock: a command superseded a moment ago is never written
             for rec in self.pending:
                 if rec["state"] != "sent" or now - rec["last"] < ACK_TIMEOUT_S:
                     continue
                 if rec["tries"] < RETRIES:
                     rec["tries"] += 1
                     rec["last"] = now
-                    resend.append(rec)
+                    self.send(f"cmd {rec['target']} {rec['text']}")
                 else:
                     missing = sorted(rec["need"] - set(rec["acked"]))
                     rec["state"] = "partial" if rec["acked"] else "failed"
                     rec["error"] = "no reply from " + (", ".join(missing) if missing else "any bot")
                     self._note(f"✗ '{rec['text']}' to {rec['target']}: {rec['error']}")
             self.pending = [r for r in self.pending if r["state"] == "sent" or now - r["t0"] < 10]
-        for rec in resend:
-            self.send(f"cmd {rec['target']} {rec['text']}")
 
     def _ack(self, bid, text):
         now = time.time()
@@ -149,7 +170,7 @@ class Gateway:
     def _refused(self, bid, text, reason):
         """The bot received the command but refused it (firmware sends ERR:<id>:<cmd>:<reason>)."""
         for rec in reversed(self.pending):
-            if rec["text"].lower() != text.strip().lower():
+            if rec["state"] not in ("sent", "acked") or rec["text"].lower() != text.strip().lower():
                 continue
             if rec["target"] != "*" and rec["target"].lower() != bid.lower():
                 continue
@@ -194,6 +215,8 @@ class Gateway:
                     bid, _, rest = text[4:].partition(":")
                     cmd, _, reason = rest.rpartition(":")
                     self._refused(bid, cmd, reason)
+                elif text.startswith("SYNC:"):
+                    pass                                # leader -> follower sequence announce, not for the Pi
                 else:
                     self._note(f"{self.macs.get(mac, mac)}: {text}")
 

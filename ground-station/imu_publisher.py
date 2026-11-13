@@ -1,6 +1,6 @@
 """Standalone IMU tilt publisher: reads the MPU6500 and publishes tilt angles over MQTT.
 
-Run it on whatever device has the IMU (a Pi, or any Linux board with I2C). The ground station
+Run it on whatever device has the IMU (a Pi, or any Linux board with SPI; wiring in imu.py). The ground station
 (app.py with MQTT_HOST set) subscribes to the topic and drives the bot over ESP-NOW.
 
     python3 imu_publisher.py --host <broker> [--rate 25] [--invert-pitch] [--invert-roll] [--swap]
@@ -51,6 +51,7 @@ def main():
         off["rezero"] = True
 
     c.on_connect, c.on_message = on_connect, on_message
+    c.reconnect_delay_set(min_delay=1, max_delay=5)   # reconnect within seconds after a broker restart
     c.connect_async(a.host, a.port, 30)
     c.loop_start()
 

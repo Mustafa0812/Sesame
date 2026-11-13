@@ -41,7 +41,12 @@ class BodyTilt:
         self.tilt_time = 0.0
         self.d = {k: 0.0 for k in CORNERS}
         self.status = "off"
-        self._hold_until = 0.0   # after switching off, keep streaming the stand pose until this time
+        # Hand-over after switching off: stream the stand pose, send the roles at roles_at, and keep streaming
+        # stand until the chosen leader confirms (app.py calls end_hold) or until _hold_until at the latest.
+        self._hold_until = 0.0
+        self.roles_at = 0.0
+        self.handover = False
+        self.roles_sent = False
         threading.Thread(target=self._run, daemon=True).start()
 
     def set_tilt(self, pitch, roll):
@@ -54,9 +59,16 @@ class BodyTilt:
     def set_enabled(self, on):
         if on and not self.enabled:
             self.d = {k: 0.0 for k in CORNERS}
-        if not on and self.enabled:
-            self._hold_until = time.time() + 1.0      # land softly in the stand pose before the leader takes over
+            self.end_hold()
+        if not on and self.enabled:                    # land softly in the stand pose before the leader takes over
+            now = time.time()
+            self.roles_at, self._hold_until = now + 0.6, now + 2.5
+            self.handover, self.roles_sent = True, False
         self.enabled = bool(on)
+
+    def end_hold(self):
+        self._hold_until = 0.0
+        self.handover = False
 
     def pose(self, hold=False):
         p = 0.0 if hold else _dead(self.pitch, self.dead)
@@ -77,8 +89,10 @@ class BodyTilt:
                 fresh = self.tilt_fresh()
                 self.status = "streaming" if fresh else "no tilt data: holding stand"
                 self.gw.send("pose " + " ".join(map(str, self.pose(hold=not fresh))))
-            elif time.time() < self._hold_until:
+            elif self.handover and time.time() < self._hold_until:
                 self.status = "returning to stand"
                 self.gw.send("pose " + " ".join(map(str, STAND)))
             else:
+                if self.handover:
+                    self.end_hold()
                 self.status = "off"

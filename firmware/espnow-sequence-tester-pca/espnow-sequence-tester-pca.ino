@@ -29,7 +29,8 @@
  * servos go to 90 if the leader is silent for FAILSAFE_MS.
  *
  * Power: all servos from the external 5-6 V supply, common ground with the
- * ESP32. No face display here: face calls are stubs.
+ * ESP32. OLED: the sequence's animated face (face-bitmaps.h, same faces as sesame-firmware-main)
+ * while a sequence runs, the battery screen the rest of the time.
  * Libraries: Adafruit SSD1306 + GFX (OLED). No servo library: raw PCA9685 register writes over Wire.
  * Enable "USB CDC On Boot".
  * NOTE: movement-sequences.h here is a copy of the one in sesame-firmware-main.
@@ -44,6 +45,7 @@
 #include <Adafruit_SSD1306.h>
 #include "espnow-comms.h"
 #include "movement-sequences.h"
+#include "face-bitmaps.h"
 #include "battery.h"
 
 // ---------------------------------------------------------------- OLED + battery (INA260)
@@ -51,6 +53,7 @@
 // INA260 goes on the BATTERY side, before the buck: battery + -> IN+, IN- -> buck input +.
 // See battery.h for the method. On a bench supply type 'batt r 0' (no internal resistance).
 enum Role { ROLE_LEADER, ROLE_FOLLOWER };
+bool sequenceRunning = false;            // a sequence (or sweep) is playing on this board
 extern Role role;                            // defined with the other globals below
 const int I2C_SDA_PIN = 6;
 const int I2C_SCL_PIN = 11;
@@ -106,12 +109,17 @@ void drawBatteryScreen() {
   oled.display();
 }
 
+void updateFaceFrame();                      // face animation, in the faces section below
+
+// While a sequence runs the OLED shows its face (one redraw per new frame, ~1 per second);
+// otherwise the battery screen every OLED_PERIOD_MS.
 void updateOled() {
   if (!oledOk) return;
+  if (battCurrentMa > battPeakMa) battPeakMa = battCurrentMa;
+  if (sequenceRunning) { updateFaceFrame(); return; }
   unsigned long now = millis();
   if (now - lastOledMs < OLED_PERIOD_MS) return;
   lastOledMs = now;
-  if (battCurrentMa > battPeakMa) battPeakMa = battCurrentMa;
   drawBatteryScreen();
 }
 
@@ -126,6 +134,13 @@ void updateOled() {
 #define PCA_OSC_HZ    25000000UL
 
 bool pcaOk = false;
+// Supply dips from servo current can make an I2C write fail or reset the PCA9685 (it then wakes up asleep
+// with every output off). Both used to lose servo moves silently; now they are retried / repaired and counted.
+uint32_t pcaI2cErr = 0;                      // failed write attempts (each is retried once)
+uint32_t pcaLost = 0;                        // writes that failed twice: a servo move was lost
+uint32_t pcaResets = 0;                      // times the PCA9685 was found reset and re-initialised
+long pcaLastUs[16];                          // last pulse per channel, to restore after a PCA reset (-1 = none)
+unsigned long lastPcaCheckMs = 0;
 
 bool pcaBegin() {
   Wire.beginTransmission(PCA_ADDR);
@@ -147,12 +162,35 @@ bool pcaBegin() {
 // pulse width in microseconds on one channel (0 = no pulse, servo limp)
 void pcaSetUs(uint8_t ch, long us) {
   uint16_t off = (uint16_t)(us * 4096UL * PCA_HZ / 1000000UL);
+  if (ch < 16) pcaLastUs[ch] = us;
+  for (int attempt = 0; attempt < 2; attempt++) {
+    Wire.beginTransmission(PCA_ADDR);
+    Wire.write(PCA_LED0_ON_L + 4 * ch);
+    Wire.write(0); Wire.write(0);
+    if (us <= 0) { Wire.write(0); Wire.write(0x10); }            // full-off bit
+    else         { Wire.write(off & 0xFF); Wire.write(off >> 8); }
+    if (Wire.endTransmission() == 0) return;
+    pcaI2cErr++;
+  }
+  pcaLost++;
+}
+
+// Once a second: a PCA9685 that lost power comes back in sleep mode (MODE1 bit 4) with all outputs off.
+// Re-initialise it and send every channel its last pulse again.
+void pcaCheck() {
+  if (!pcaOk) return;
+  unsigned long now = millis();
+  if (now - lastPcaCheckMs < 1000) return;
+  lastPcaCheckMs = now;
   Wire.beginTransmission(PCA_ADDR);
-  Wire.write(PCA_LED0_ON_L + 4 * ch);
-  Wire.write(0); Wire.write(0);
-  if (us <= 0) { Wire.write(0); Wire.write(0x10); }              // full-off bit
-  else         { Wire.write(off & 0xFF); Wire.write(off >> 8); }
-  Wire.endTransmission();
+  Wire.write(PCA_MODE1);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom((uint8_t)PCA_ADDR, (uint8_t)1) != 1) { pcaI2cErr++; return; }
+  uint8_t mode1 = Wire.read();
+  if (!(mode1 & 0x10)) return;               // awake: fine
+  pcaResets++;
+  Serial.printf("PCA9685 was reset (MODE1 0x%02X, supply dip?): restoring outputs\n", mode1);
+  if (!pcaBegin()) return;
+  for (int ch = 0; ch < 16; ch++) if (pcaLastUs[ch] >= 0) pcaSetUs(ch, pcaLastUs[ch]);
 }
 
 // Per-servo calibration, in servo-index order (R1 R2 L1 L2 R4 R3 L3 L4, same as servoChannels = PCA channels 0-7).
@@ -231,7 +269,6 @@ PcaServo servos[NUM_SERVOS];
 int rawAngle[NUM_SERVOS] = {-1, -1, -1, -1, -1, -1, -1, -1};   // last 'raw'/'jog' physical angle, -1 = none
 
 Role role = ROLE_FOLLOWER;
-bool sequenceRunning = false;
 String runningName = "";                     // sequence in progress, for telemetry (stays set until it really ends)
 
 // leader state
@@ -249,16 +286,116 @@ uint16_t lastPoseSeq = 0;
 uint32_t poseStale = 0, intervalPoses = 0, intervalMaxGap = 0;
 int8_t lastPoseRssi = 0;
 unsigned long lastStatsMs = 0;
+uint8_t lastPoseMac[6] = {0};               // sender of the last accepted pose (each sender numbers its own packets)
+
+// Lockstep playback. When the leader starts a sequence it announces it 3 times, 30 ms apart:
+// "SYNC:<leader id>:<run>:<ms until start>:<name>". Everyone starts 60 ms after the first announce (a follower
+// that only hears the 2nd or 3rd still starts on time), and every follower plays the same sequence from its own copy of
+// movement-sequences.h, so lost pose packets can no longer drop steps. The leader keeps streaming
+// poses; a follower that missed all three announces simply copies that stream as before.
+bool localRun = false;                       // follower: playing an announced sequence itself
+uint16_t syncRunId = 0;                      // leader: number of the current run (random start, set in setup)
+String syncName = "";                        // leader: what to announce (a sequence name or "stop")
+int syncSendsLeft = 0;
+unsigned long lastSyncSendMs = 0;
+unsigned long syncStartMs = 0;               // leader: when the announced run starts
+const unsigned long SYNC_LEAD_MS = 60;
+String syncPendKey = "", syncPendName = "", syncLastKey = "";   // follower: received announce
+unsigned long syncPendMs = 0;                // follower: when to start it
+const char* const SEQ_NAMES[] = { "rest", "stand", "wave", "dance", "swim", "point", "pushup", "bow", "cute",
+                                  "freaky", "worm", "shake", "shrug", "dead", "crab", "forward", "backward",
+                                  "left", "right" };
+bool isSequenceName(const String& n) {
+  for (const char* k : SEQ_NAMES) if (n == k) return true;
+  return false;
+}
 
 // ---------------------------------------------------------------- forward declarations
 void serviceAll();
 void handleCommand(String cmd);
 
-// ---------------------------------------------------------------- stubs / helpers required by movement-sequences.h
-void setFace(const String& faceName) {}
-void setFaceMode(FaceAnimMode mode) {}
-void setFaceWithMode(const String& faceName, FaceAnimMode mode) {}
-void enterIdle() {}
+// ---------------------------------------------------------------- faces (OLED, while a sequence runs)
+// Same faces and animation modes as sesame-firmware-main: each sequence in movement-sequences.h picks
+// its face with setFaceWithMode(). Each new frame is one OLED refresh (~25 ms of I2C). Most faces run
+// at 1 frame/s, and leader and follower draw the same frames at the same moments, so they stay in step.
+struct FaceEntry { const char* name; const unsigned char* const* frames; };
+static const uint8_t MAX_FACE_FRAMES = 6;
+
+#define MAKE_FACE_FRAMES(name) \
+  const unsigned char* const face_##name##_frames[MAX_FACE_FRAMES] = { \
+    epd_bitmap_##name, epd_bitmap_##name##_1, epd_bitmap_##name##_2, \
+    epd_bitmap_##name##_3, epd_bitmap_##name##_4, epd_bitmap_##name##_5 };
+#define X(name) MAKE_FACE_FRAMES(name)
+FACE_LIST
+#undef X
+#undef MAKE_FACE_FRAMES
+
+const FaceEntry faceEntries[] = {
+#define X(name) { #name, face_##name##_frames },
+  FACE_LIST
+#undef X
+};
+
+struct FaceFps { const char* name; uint8_t fps; };
+const FaceFps faceFpsTable[] = { { "point", 5 }, { "dead", 2 }, { "idle_blink", 7 } };   // all others 1 frame/s
+
+const unsigned char* const* faceFrames = nullptr;   // null = no face yet in this sequence
+uint8_t faceFrameCount = 0, faceFrameIndex = 0, faceFpsNow = 1;
+int8_t faceDir = 1;
+FaceAnimMode faceMode = FACE_ANIM_LOOP;
+bool faceDone = false;
+String faceName = "";
+unsigned long lastFaceFrameMs = 0;
+
+void faceReset() { faceFrames = nullptr; faceName = ""; }
+
+void drawFaceFrame() {
+  if (!oledOk || !sequenceRunning || !faceFrames || !faceFrames[faceFrameIndex]) return;
+  oled.clearDisplay();
+  oled.drawBitmap(0, 0, faceFrames[faceFrameIndex], 128, 64, 1);
+  oled.display();
+}
+
+void setFace(const String& name) {
+  if (name == faceName && faceFrames) return;
+  faceName = name;
+  faceFrames = nullptr;
+  for (const FaceEntry& e : faceEntries)
+    if (name.equalsIgnoreCase(e.name)) { faceFrames = e.frames; break; }
+  if (!faceFrames || !faceFrames[0]) faceFrames = face_defualt_frames;   // (sic) its name in face-bitmaps.h
+  faceFrameCount = 0;
+  while (faceFrameCount < MAX_FACE_FRAMES && faceFrames[faceFrameCount]) faceFrameCount++;
+  faceFpsNow = 1;
+  for (const FaceFps& f : faceFpsTable) if (name.equalsIgnoreCase(f.name)) faceFpsNow = f.fps;
+  faceFrameIndex = 0;
+  faceDir = 1;
+  faceDone = false;
+  lastFaceFrameMs = millis();
+  drawFaceFrame();
+}
+
+void setFaceMode(FaceAnimMode mode) { faceMode = mode; faceDir = 1; faceDone = false; }
+void setFaceWithMode(const String& name, FaceAnimMode mode) { setFaceMode(mode); setFace(name); }
+void enterIdle() {}                          // no idle face: the battery screen shows between sequences
+
+// Next animation frame when it is due (from updateOled while a sequence runs).
+void updateFaceFrame() {
+  if (!faceFrames || faceFrameCount <= 1 || (faceMode == FACE_ANIM_ONCE && faceDone)) return;
+  unsigned long now = millis();
+  if (now - lastFaceFrameMs < 1000UL / faceFpsNow) return;
+  lastFaceFrameMs = now;
+  if (faceMode == FACE_ANIM_LOOP) {
+    faceFrameIndex = (faceFrameIndex + 1) % faceFrameCount;
+  } else if (faceMode == FACE_ANIM_ONCE) {
+    if (faceFrameIndex + 1 >= faceFrameCount) { faceDone = true; return; }   // stay on the last frame
+    faceFrameIndex++;
+  } else {                                   // boomerang: 0 1 2 1 0 1 ...
+    int next = faceFrameIndex + faceDir;
+    if (next < 0 || next >= faceFrameCount) { faceDir = -faceDir; next = faceFrameIndex + faceDir; }
+    faceFrameIndex = (uint8_t)next;
+  }
+  drawFaceFrame();
+}
 
 void delayWithFace(unsigned long ms) {
   unsigned long start = millis();
@@ -272,7 +409,7 @@ void setServoAngle(uint8_t channel, int angle) {
   if (channel >= NUM_SERVOS) return;
   angle = constrain(angle, 0, 180);
   cmdAngle[channel] = (uint8_t)angle;
-  if (role == ROLE_LEADER) servos[channel].write(angle);
+  if (role == ROLE_LEADER || localRun) servos[channel].write(angle);
   delayWithFace(motorCurrentDelay);
 }
 
@@ -293,7 +430,12 @@ bool pressingCheck(String cmd, int ms) {
 void handlePose8(const EspNowRxMsg& m) {
   if (role != ROLE_FOLLOWER || m.hdr.len != sizeof(Pose8Payload)) return;
   unsigned long now = millis();
-  bool resync = !gotAnyPose || (now - lastPoseRxMs > RESYNC_MS);
+  if (localRun) { lastPoseRxMs = now; return; }   // playing the sequence ourselves; the stream is the fallback
+  // A different sender (Pi <-> leader handover) has its own packet counter: start over instead of
+  // dropping its packets as 'stale' until the failsafe trips.
+  bool otherSender = memcmp(m.mac, lastPoseMac, 6) != 0;
+  if (gotAnyPose && otherSender && now - lastPoseRxMs < 200) return;   // two senders at once: stay with the current one
+  bool resync = !gotAnyPose || otherSender || (now - lastPoseRxMs > RESYNC_MS);
   if (!resync && (int16_t)(m.hdr.seq - lastPoseSeq) <= 0) { poseStale++; return; }
 
   if (gotAnyPose && !resync) {
@@ -305,6 +447,7 @@ void handlePose8(const EspNowRxMsg& m) {
   for (int i = 0; i < NUM_SERVOS; i++) tgtAngle[i] = (uint8_t)constrain((int)p.angles[i], 0, 180);
 
   lastPoseSeq = m.hdr.seq;
+  memcpy(lastPoseMac, m.mac, 6);
   lastPoseRxMs = now;
   lastPoseRssi = m.rssi;
   gotAnyPose = true;
@@ -328,6 +471,25 @@ void onMessage(const EspNowRxMsg& m) {
   if (m.hdr.type == ESPNOW_MSG_POSE8) handlePose8(m);
   else if (m.hdr.type == ESPNOW_MSG_TEXT) {
     const char* t = (const char*)m.payload;
+    if (strncmp(t, "SYNC:", 5) == 0) {           // "SYNC:<leader id>:<run>:<ms>:<name|stop>" from the leader
+      if (role != ROLE_FOLLOWER) return;
+      String s = String(t + 5);
+      int c1 = s.indexOf(':'), c2 = s.indexOf(':', c1 + 1), c3 = s.indexOf(':', c2 + 1);
+      if (c1 <= 0 || c2 < 0 || c3 < 0) return;
+      String key = s.substring(0, c2), name = s.substring(c3 + 1);
+      if (key == syncLastKey && name != "stop") return;   // repeat of an announce we already played
+      syncPendKey = key;
+      syncPendName = name;
+      syncPendMs = millis() + (unsigned long)constrain(s.substring(c2 + 1, c3).toInt(), 0, 200);
+      return;
+    }
+    if (localRun && strncmp(t, "TLM:", 4) == 0) {
+      // The leader's telemetry says it has finished (run=-): end our walk too, in case its 'stop' was lost.
+      String s = String(t + 4);
+      int c = s.indexOf(':');
+      if (c > 0 && syncLastKey.startsWith(s.substring(0, c) + ":") && s.indexOf(";run=-;") >= 0) currentCommand = "";
+      return;
+    }
     if (strncmp(t, "CMD:", 4) != 0) return;
     String s = String(t + 4);
     int c = s.indexOf(':');
@@ -350,13 +512,14 @@ void sendTelemetry() {
   if (!tlmNow && now - lastTlmMs < 1000) return;
   tlmNow = false;
   lastTlmMs = now;
-  char buf[150];
-  snprintf(buf, sizeof(buf), "TLM:%s:role=%c;run=%s;v=%.2f;ma=%.0f;pct=%d;up=%lu;rst=%s",
+  char buf[180];
+  snprintf(buf, sizeof(buf), "TLM:%s:role=%c;run=%s;v=%.2f;ma=%.0f;pct=%d;up=%lu;rst=%s;i2c=%lu;lost=%lu;pcar=%lu",
            boardId.c_str(), role == ROLE_LEADER ? 'L' : 'F',
            sequenceRunning ? (runningName.length() ? runningName.c_str() : "busy") : "-",
            battInaOk ? battBusV : 0.0f, battInaOk ? battCurrentMa : 0.0f,
            (battInaOk && battHaveFilter && !battStale) ? battPercent : -1,
-           now / 1000UL, resetReason);
+           now / 1000UL, resetReason,
+           (unsigned long)pcaI2cErr, (unsigned long)pcaLost, (unsigned long)pcaResets);
   espnowSendText(String(buf));
 }
 
@@ -394,6 +557,7 @@ void leaderStream() {
 void followerUpdate() {
   unsigned long now = millis();
 
+  if (localRun) return;                      // playing an announced sequence: servos are driven directly
   if (role == ROLE_FOLLOWER && gotAnyPose && !failsafeTripped && now - lastPoseRxMs > FAILSAFE_MS) {
     for (int i = 0; i < NUM_SERVOS; i++) tgtAngle[i] = 90;
     failsafeTripped = true;
@@ -438,37 +602,113 @@ void pollSerial() {
   }
 }
 
+void playSequence(const String& name);
+
+void leaderSyncAnnounce() {
+  if (!syncSendsLeft || role != ROLE_LEADER) return;
+  unsigned long now = millis();
+  if (lastSyncSendMs && now - lastSyncSendMs < 30) return;
+  lastSyncSendMs = now ? now : 1;
+  syncSendsLeft--;
+  long wait = (long)(syncStartMs - now);
+  if (wait < 0 || syncName == "stop") wait = 0;
+  espnowSendText("SYNC:" + boardId + ":" + String(syncRunId) + ":" + String(wait) + ":" + syncName);
+}
+
+void followerSync() {
+  if (!syncPendName.length()) return;
+  if (role != ROLE_FOLLOWER) { syncPendName = ""; return; }
+  if (sequenceRunning) {
+    // 'stop', or the leader already started the next one: end ours (walks and turns stop at the next step)
+    bool isStop = syncPendName == "stop";
+    if (localRun && (isStop ? syncPendKey == syncLastKey : syncPendKey != syncLastKey)) currentCommand = "";
+    if (syncPendName == "stop") syncPendName = "";
+    return;                                  // a new sequence starts once this one has ended
+  }
+  if (syncPendName != "stop" && (long)(millis() - syncPendMs) < 0) return;   // not time to start yet
+  String name = syncPendName, key = syncPendKey;
+  syncPendName = "";
+  if (name == "stop" || millis() - syncPendMs > 1000 || !isSequenceName(name)) return;   // late: keep copying the stream
+  syncLastKey = key;
+  localRun = true;
+  for (int i = 0; i < NUM_SERVOS; i++) cmdAngle[i] = (uint8_t)lroundf(curAngle[i]);
+  Serial.printf("Playing '%s' together with the leader\n", name.c_str());
+  playSequence(name);
+  localRun = false;
+  for (int i = 0; i < NUM_SERVOS; i++) { curAngle[i] = cmdAngle[i]; tgtAngle[i] = cmdAngle[i]; }
+  gotAnyPose = false;                        // take the leader's stream up again from its next packet
+  failsafeTripped = false;
+}
+
+// Remote commands get exactly one reply: ACK (accepted) or ERR:<id>:<cmd>:<reason> (refused).
+// The Pi re-sends a command until it hears a reply, so an accepted command that arrives again within 1.2 s
+// is a re-send: it gets the ACK again and is not run a second time. Refused commands are judged afresh.
+String lastRcmd = "", lastRreply = "";
+unsigned long lastRcmdMs = 0;
+void serviceRemoteCmd() {
+  if (!rcmdCount) return;
+  String c = remoteCmds[rcmdHead];
+  rcmdHead = (rcmdHead + 1) % RCMD_SLOTS;
+  rcmdCount--;
+  String lc = c;
+  lc.trim();
+  lc.toLowerCase();
+  if (lc == lastRcmd && lastRreply.startsWith("ACK:") && millis() - lastRcmdMs < 1200) {
+    lastRcmdMs = millis();                   // still re-sending: keep treating it as the same command
+    espnowSendText(lastRreply);
+    return;
+  }
+  String reply;
+  if (sequenceRunning && lc != "stop")
+    reply = "ERR:" + boardId + ":" + c + ":busy running " + (runningName.length() ? runningName : String("a sequence"));
+  else if (lc.startsWith("seq ") && role != ROLE_LEADER)
+    reply = "ERR:" + boardId + ":" + c + ":not the leader";
+  else
+    reply = "ACK:" + boardId + ":" + c;
+  lastRcmd = lc;
+  lastRreply = reply;
+  lastRcmdMs = millis();
+  espnowSendText(reply);
+  if (reply.startsWith("ACK:")) handleCommand(c);
+}
+
 void serviceAll() {
   espnowService();
+  pcaCheck();
+  leaderSyncAnnounce();
   leaderStream();
   followerUpdate();
   batteryUpdate();
   updateOled();
   pollSerial();
   sendTelemetry();
-  if (rcmdCount) {
-    String c = remoteCmds[rcmdHead];
-    rcmdHead = (rcmdHead + 1) % RCMD_SLOTS;
-    rcmdCount--;
-    espnowSendText("ACK:" + boardId + ":" + c);           // received
-    String lc = c;
-    lc.trim();
-    lc.toLowerCase();
-    if (sequenceRunning && lc != "stop") {                // refused: tell the Pi why (ERR:<id>:<cmd>:<reason>)
-      espnowSendText("ERR:" + boardId + ":" + c + ":busy running " + (runningName.length() ? runningName : String("a sequence")));
-    } else if (lc.startsWith("seq ") && role != ROLE_LEADER) {
-      espnowSendText("ERR:" + boardId + ":" + c + ":not the leader");
-    } else {
-      handleCommand(c);
-    }
-  }
+  serviceRemoteCmd();
+  followerSync();
 }
 
 // ---------------------------------------------------------------- sequences
 void runSequence(const String& name) {
   if (role != ROLE_LEADER) { Serial.println("Only the leader runs sequences. Send 'leader' first."); return; }
+  if (!isSequenceName(name)) {
+    Serial.println("Unknown sequence. Names: rest stand wave dance swim point pushup bow cute freaky worm shake shrug dead crab forward backward left right");
+    return;
+  }
+  syncRunId++;                               // announce it so the followers play it in step
+  syncName = name;
+  syncSendsLeft = 3;
+  lastSyncSendMs = 0;
+  syncStartMs = millis() + SYNC_LEAD_MS;
+  faceReset();                               // the screen keeps the battery view until the sequence sets its face
+  sequenceRunning = true;                    // busy while waiting: remote commands are refused, not nested
+  runningName = name;
+  leaderSyncAnnounce();
+  while ((long)(millis() - syncStartMs) < 0) { serviceAll(); delay(1); }
+  playSequence(name);
+}
 
+void playSequence(const String& name) {
   bool found = true;
+  faceReset();                               // always draw the sequence's face, even if it ran last time
   sequenceRunning = true;
   currentCommand = name;
   runningName = name;
@@ -498,10 +738,11 @@ void runSequence(const String& name) {
   sequenceRunning = false;
   currentCommand = "";
   runningName = "";
+  faceReset();
+  lastOledMs = 0;                            // battery screen again right away
   requestTelemetry();
 
-  if (found) Serial.println("Sequence done");
-  else Serial.println("Unknown sequence. Names: rest stand wave dance swim point pushup bow cute freaky worm shake shrug dead crab forward backward left right");
+  Serial.println(found ? "Sequence done" : "Unknown sequence");
 }
 
 // Wiggle ONE servo on THIS board only (not sent to the other board). For checking breadboard wiring.
@@ -666,7 +907,11 @@ void handleCommand(String cmd) {
   if (!cmd.length()) return;
 
   if (sequenceRunning) {
-    if (cmd == "stop") { currentCommand = ""; Serial.println("Stop requested"); }
+    if (cmd == "stop") {
+      currentCommand = "";
+      Serial.println("Stop requested");
+      if (role == ROLE_LEADER && !localRun) { syncName = "stop"; syncSendsLeft = 2; lastSyncSendMs = 0; }
+    }
     else Serial.println("Busy: only 'stop' works while a sequence runs");
     return;
   }
@@ -677,6 +922,8 @@ void handleCommand(String cmd) {
     Serial.printf("  role %s | stale poses %lu | slew %.1f deg/10ms | TX power %d dBm\n",
                   role == ROLE_LEADER ? "LEADER" : "FOLLOWER",
                   (unsigned long)poseStale, slewStep, txPowerDbm);
+    Serial.printf("  PCA9685: I2C write errors %lu, lost servo moves %lu, resets repaired %lu | reset reason %s\n",
+                  (unsigned long)pcaI2cErr, (unsigned long)pcaLost, (unsigned long)pcaResets, resetReason);
   }
   else if (cmd == "leader") {
     if (role != ROLE_LEADER) {          // only on a change: a repeated 'leader' must not reset the stream
@@ -690,6 +937,7 @@ void handleCommand(String cmd) {
   else if (cmd == "follower") {
     if (role != ROLE_FOLLOWER) {        // only on a change: a repeated 'follower' must not move the servos
       role = ROLE_FOLLOWER;
+      syncSendsLeft = 0;
       gotAnyPose = false;
       failsafeTripped = false;
       for (int i = 0; i < NUM_SERVOS; i++) { curAngle[i] = cmdAngle[i]; tgtAngle[i] = cmdAngle[i]; }
@@ -806,6 +1054,7 @@ void setup() {
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
+  for (int ch = 0; ch < 16; ch++) pcaLastUs[ch] = -1;
   pcaOk = pcaBegin();
   if (!pcaOk) Serial.printf("PCA9685 NOT found at 0x%02X: servos disabled (check wiring)\n", PCA_ADDR);
 
@@ -831,6 +1080,7 @@ void setup() {
   delay(100);
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   if (!espnowBegin("seq-tester")) Serial.println("ESP-NOW failed to start!");
+  syncRunId = (uint16_t)random(65536);
   espnowOnMessage = onMessage;
 
   Serial.println("Servo map (index, name, PCA9685 channel):");

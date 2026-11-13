@@ -8,7 +8,8 @@
 | Gateway (ESP32 WROOM-32 dev board on the Pi's USB) | [`espnow-gateway/`](espnow-gateway/) |
 
 The Raspberry Pi side is in [`../ground-station`](../ground-station/README.md). Old bench testers are in
-[`archive/`](archive/README.md). The rest of this document describes the original single-robot web firmware
+[`archive/`](archive/README.md), and the ESP32-S3 SuperMini porting notes are in
+[`docs/esp32-s3-supermini`](../docs/esp32-s3-supermini/README.md). The rest of this document describes the original single-robot web firmware
 (`sesame-firmware-main`), which this two-bot setup does not use.
 
 ---
@@ -33,8 +34,8 @@ This document provides technical information on the firmware architecture, contr
 - [Idle Animation System](#idle-animation-system)
 - [Firmware Architecture](#firmware-architecture)
 - [Technical Implementation](#technical-implementation-overview)
-- [Asset Pipeline &amp; Face Customization](#asset-pipeline--face-customization)
 - [Hardware Abstraction Layer](#hardware-abstraction-layer-hal)
+- [Asset Pipeline & Face Customization](#asset-pipeline--face-customization)
 
 ## How to Flash the Firmware
 
@@ -64,7 +65,7 @@ This document provides technical information on the firmware architecture, contr
 1. **Connect your board** via USB to your computer
 2. **Open the firmware**:
 
-   - Open [sesame-firmware-main.ino](sesame-firmware-main.ino) in Arduino IDE
+   - Open [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino) in Arduino IDE
    - Make sure you have it in a folder with the same name.
    - Also include all of the .h header files.
 3. **Select your board**:
@@ -88,7 +89,7 @@ This document provides technical information on the firmware architecture, contr
    - Go to **Tools → Port** and select your ESP32's COM port
 6. **Choose your board configuration** in the code:
 
-   - Open [sesame-firmware-main.ino](sesame-firmware-main.ino)
+   - Open [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino)
    - Find the pin configuration section (around line 55-65)
    - **If you built with the Lolin S2 Mini:** Uncomment the S2 Mini `servoPins` array and `I2C_SDA`/`I2C_SCL` defines. Comment out the Distro Board section.
    - **If you built with the Distro Board V3:** Uncomment the V3 `servoPins` array and `I2C_SDA`/`I2C_SCL` defines. Comment out others.
@@ -143,10 +144,10 @@ This document provides technical information on the firmware architecture, contr
 
 The firmware is split into several key files to keep the logic organized and assets easy to manage:
 
-- **[sesame-firmware-main.ino](sesame-firmware-main.ino)**: The main entry point containing the `setup()`, `loop()`, core system logic, network configuration, and API endpoints.
-- **[face-bitmaps.h](face-bitmaps.h)**: A dedicated header for OLED face macros and raw bitmap data. Now includes extensive conversational faces for voice assistant integration.
-- **[movement-sequences.h](movement-sequences.h)**: Definitions for all procedural movement and pose animations.
-- **[captive-portal.h](captive-portal.h)**: Contains the HTML, CSS, and JS for the web-based remote control interface.
+- **[sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino)**: The main entry point containing the `setup()`, `loop()`, core system logic, network configuration, and API endpoints.
+- **[face-bitmaps.h](sesame-firmware-main/face-bitmaps.h)**: A dedicated header for OLED face macros and raw bitmap data. Now includes extensive conversational faces for voice assistant integration.
+- **[movement-sequences.h](sesame-firmware-main/movement-sequences.h)**: Definitions for all procedural movement and pose animations.
+- **[captive-portal.h](sesame-firmware-main/captive-portal.h)**: Contains the HTML, CSS, and JS for the web-based remote control interface.
 
 ## Technical Implementation Overview
 
@@ -176,7 +177,7 @@ The firmware is built on the Arduino-ESP32 framework. Currently the firmware is 
 
 - **I2C Bus Hardware**: Utilizes the ESP32's hardware I2C controller at 400kHz (Fast Mode) for minimal latency when pushing full-frame buffers to the SSD1306 display.
 - **Memory Management (`PROGMEM`)**: Large 128x64 bitmap arrays (1024 bytes per frame) are stored in Flash memory using the `PROGMEM` attribute.
-- **Macro-Based Asset Management**: The firmware uses a `FACE_LIST` macro in [face-bitmaps.h](face-bitmaps.h) to automatically register and handle new faces, reducing the boilerplate required when adding animations.
+- **Macro-Based Asset Management**: The firmware uses a `FACE_LIST` macro in [face-bitmaps.h](sesame-firmware-main/face-bitmaps.h) to automatically register and handle new faces, reducing the boilerplate required when adding animations.
 - **Rendering Pipeline**: The `updateAnimatedFace()` function manages frame rates and sequence looping outside of the main movement logic to ensure smooth visual feedback even during complex movements.
 - **Dynamic WiFi Info Overlay**: The `updateWifiInfoScroll()` function composites scrolling connection information over the face bitmap during the first 30 seconds of operation (before first input), drawing the face as background with a black bar and white text overlay for readability.
 - **Idle Animation System**: Implements realistic idle behavior with randomized blinking (including double-blinks) and boomerang face animations, triggered automatically when no input is detected.
@@ -221,7 +222,7 @@ You can join the robot to your network at runtime, without editing the code:
 
 To connect the robot to your home or office WiFi network:
 
-1. **Enable Network Mode** in [sesame-firmware-main.ino](sesame-firmware-main.ino):
+1. **Enable Network Mode** in [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino):
 
    ```cpp
    #define NETWORK_SSID "YourNetworkName"  // Your WiFi network name
@@ -692,34 +693,7 @@ The idle system uses:
 - `updateIdleBlink()` - Manages random blink timing and double-blink logic
 - `scheduleNextIdleBlink()` - Randomizes blink intervals for natural appearance
 
-To customize idle behavior, modify the timing values in [sesame-firmware-main.ino](sesame-firmware-main.ino):
-
-```cpp
-scheduleNextIdleBlink(3000, 7000);  // Min and max ms between blinks
-```
-
-## Asset Pipeline & Face Customization
-
-The firmware includes an intelligent idle animation system that activates automatically:
-
-### Behavior
-
-- **Activation**: When the robot has received no commands for a period, it enters idle mode
-- **Idle Face**: Displays a gentle "breathing" animation using the `idle` face in `FACE_ANIM_BOOMERANG` mode
-- **Blinking**: Randomly triggers blink animations (3-7 second intervals)
-- **Double Blinks**: 30% chance of a double blink for realistic behavior
-- **Exit**: Any movement command or input immediately exits idle mode
-
-### Technical Implementation
-
-The idle system uses:
-
-- `enterIdle()` - Activates idle face with boomerang animation
-- `exitIdle()` - Returns to normal operation
-- `updateIdleBlink()` - Manages random blink timing and double-blink logic
-- `scheduleNextIdleBlink()` - Randomizes blink intervals for natural appearance
-
-To customize idle behavior, modify the timing values in [sesame-firmware-main.ino](sesame-firmware-main.ino):
+To customize idle behavior, modify the timing values in [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino):
 
 ```cpp
 scheduleNextIdleBlink(3000, 7000);  // Min and max ms between blinks
@@ -793,11 +767,11 @@ The firmware abstracts pin definitions via the `servoPins` array. The default co
 
 ### Porting to Other ESP32 Variants
 
-To port this to a different ESP32 variant, modify the `servoPins` and `I2C_` defines in the header of [sesame-firmware-main.ino](sesame-firmware-main.ino). Ensure the chosen pins are PWM-capable and not "input-only".
+To port this to a different ESP32 variant, modify the `servoPins` and `I2C_` defines in the header of [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino). Ensure the chosen pins are PWM-capable and not "input-only".
 
 ## Asset Pipeline & Face Customization
 
-To maintain a clean main source file and optimize performance, face bitmaps are decoupled from the primary logic. Faces are managed in [face-bitmaps.h](face-bitmaps.h) using a "Single Source of Truth" macro system.
+To maintain a clean main source file and optimize performance, face bitmaps are decoupled from the primary logic. Faces are managed in [face-bitmaps.h](sesame-firmware-main/face-bitmaps.h) using a "Single Source of Truth" macro system.
 
 ### Face Library
 
@@ -838,18 +812,18 @@ The "talk_" variants feature open mouths for lip-sync and animated speech. These
 1. **Image Creation**: Find faces using Kaomoji or [Emojicombos](https://emojicombos.com/kaomoji). Create a `128x64` image in a tool like [jsPaint](https://jspaint.app/).
 2. **Bitmap Conversion**: Use [image2cpp](https://javl.github.io/image2cpp/) with `Horizontal` scaling, `128x64` resolution, and `Arduino Code` output.
 3. **Registration**:
-   - Add your face name to the `FACE_LIST` macro in [face-bitmaps.h](face-bitmaps.h).
-   - Paste the generated C array into [face-bitmaps.h](face-bitmaps.h) right after the last bitmap in the list.
-   - (Optional) For animations, add numbered suffixes (e.g., `_1`, `_2`) and register the FPS in the `faceFpsEntries` in [sesame-firmware-main.ino](sesame-firmware-main.ino).
+   - Add your face name to the `FACE_LIST` macro in [face-bitmaps.h](sesame-firmware-main/face-bitmaps.h).
+   - Paste the generated C array into [face-bitmaps.h](sesame-firmware-main/face-bitmaps.h) right after the last bitmap in the list.
+   - (Optional) For animations, add numbered suffixes (e.g., `_1`, `_2`) and register the FPS in the `faceFpsEntries` in [sesame-firmware-main.ino](sesame-firmware-main/sesame-firmware-main.ino).
 
 ### Animating Faces
 
-For an animation to be recognized by the `MAKE_FACE_FRAMES` macro, your array names in [face-bitmaps.h](face-bitmaps.h) must follow a strict naming convention:
+For an animation to be recognized by the `MAKE_FACE_FRAMES` macro, your array names in [face-bitmaps.h](sesame-firmware-main/face-bitmaps.h) must follow a strict naming convention:
 
 - **Root Frame**: `epd_bitmap_myface` (This is required and acts as frame 0).
 - **Subsequent Frames**: `epd_bitmap_myface_1`, `epd_bitmap_myface_2`, etc.
 - **Limit**: The default system supports up to 6 frames per face (Root + 5 numbered frames).
-- **Animation Modes**: Animations can be configured to play as a `LOOP` (restarts at frame 0), `ONCE` (stops on the final frame), or `BOOMERANG` (plays forward then reverses). These modes are typically defined in [movement-sequences.h](movement-sequences.h) when triggerring a pose.
+- **Animation Modes**: Animations can be configured to play as a `LOOP` (restarts at frame 0), `ONCE` (stops on the final frame), or `BOOMERANG` (plays forward then reverses). These modes are typically defined in [movement-sequences.h](sesame-firmware-main/movement-sequences.h) when triggerring a pose.
 
 ### Macro System
 

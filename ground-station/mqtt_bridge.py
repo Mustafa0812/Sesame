@@ -9,6 +9,7 @@ Environment: MQTT_HOST (default localhost), MQTT_PORT (1883), MQTT_USER, MQTT_PA
   out  <prefix>/imu/zero           "1" when you press Set level (imu_publisher.py re-levels)
 """
 import json
+import math
 import os
 import threading
 import time
@@ -33,6 +34,7 @@ class MqttBridge:
         self.connected = False
 
     def start(self):
+        self.c.reconnect_delay_set(min_delay=1, max_delay=5)   # back within seconds after a broker restart
         self.c.connect_async(self.host, int(os.environ.get("MQTT_PORT", "1883")), 30)
         self.c.loop_start()
         threading.Thread(target=self._publish_state, daemon=True).start()
@@ -47,9 +49,13 @@ class MqttBridge:
             topic = msg.topic[len(self.p) + 1:]
             if topic == "tilt":
                 d = json.loads(msg.payload)
-                self.on_tilt(float(d["pitch"]), float(d["roll"]))
+                p, r = float(d["pitch"]), float(d["roll"])
+                if math.isfinite(p) and math.isfinite(r):      # NaN would break the dashboard's JSON
+                    self.on_tilt(p, r)
             elif topic.startswith("env/"):
-                self.on_env(topic[4:], float(msg.payload))
+                v = float(msg.payload)
+                if math.isfinite(v):
+                    self.on_env(topic[4:], v)
         except (ValueError, KeyError, TypeError):
             pass   # malformed message: ignore
 

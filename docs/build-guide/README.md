@@ -177,8 +177,8 @@ Before dropping hardware in, trim or bundle any stray wires so nothing can flop 
 **For S2 Mini and Distro Board V1 (Legacy) Builds:**
 
 1. Inspect the harness to ensure no bare conductors can short during testing. Add heat-shrink or tape where needed.
-2. Connect a reliable USB-C cable and flash `sesame-motor-tester.ino` from the [debugging-firmware](../../firmware/debugging-firmware/) folder using Arduino IDE. If you have never flashed an ESP32 before, pause here and follow a quick tutorial so you are comfortable resetting/entering boot mode.
-3. Open [Motor testing guide.](../../hardware/Motor-testing/README.md)
+2. Connect a reliable USB-C cable and flash `sesame-motor-tester.ino` from the [debugging-firmware](../../firmware/debugging-firmware/sesame-motor-tester/) folder using Arduino IDE. If you have never flashed an ESP32 before, pause here and follow a quick tutorial so you are comfortable resetting/entering boot mode.
+3. Open [Motor testing guide.](../motor-testing/README.md)
 
 **For Distro Board V3/V2 (Build Kits):**
 If you are using a V3 or V2 Board from a Build Kit, it comes **pre-flashed** with the Sesame firmware! There is no need to plug into a computer and use Arduino IDE to flash firmware.

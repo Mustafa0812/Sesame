@@ -1,5 +1,11 @@
 # ESP32 Mini (ESP32-S3FN8) Pinout and Interface Guide
 
+> [!WARNING]
+> This page transcribes the **vendor's** pinout sheet. Several entries are wrong for the boards we received
+> (chip/flash size, GPIO8 vs GPIO48, header pins). Use the corrected tables in [README.md](README.md#2-pinout-corrected-2026-11-07-from-the-espboards-diagram).
+
+![Vendor pinout](vendor-pinout.png)
+
 Pinout of the ESP32 Mini board with a USB Type-C connector, as printed on the manufacturer's pinout guide. Pins are numbered top to bottom with the USB-C connector at the top.
 
 ## Specifications

@@ -45,7 +45,7 @@ def on_env(name, value):
 
 # ---------------------------------------------------------------- roles
 def wanted_role(bot_id):
-    if body.enabled or time.time() < body._hold_until:
+    if body.enabled or (body.handover and time.time() < body.roles_at):
         return "F"                                   # the Pi is streaming poses: everyone follows
     if leader["id"] is None:
         return None
@@ -58,6 +58,8 @@ def send_role(bot_id, role):
 
 
 def keep_roles():
+    if body.handover:
+        return                                       # handover() is setting the roles right now
     bots = [b for b in gw.bot_list() if b["online"]]
     if leader["id"] is None and not body.enabled:
         leaders = [b["id"] for b in bots if b["role"] == "L"]
@@ -76,10 +78,25 @@ def keep_roles():
 
 
 def apply_roles_now():
-    for b in gw.bot_list():
+    bots = [b for b in gw.bot_list() if b["online"]]
+    for b in sorted(bots, key=lambda b: wanted_role(b["id"]) == "L"):   # followers first: never two leaders
         want = wanted_role(b["id"])
-        if want and b["online"]:
+        if want:
             send_role(b["id"], want)
+
+
+def handover():
+    """Body tilt was switched off: the Pi streams the stand pose for 0.6 s, then sends the roles, and keeps
+    streaming stand until the chosen leader reports it is leading (at most 2.5 s), so no bot goes without poses."""
+    if not body.handover or time.time() < body.roles_at:
+        return
+    if not body.roles_sent:
+        body.roles_sent = True
+        apply_roles_now()
+        return
+    lead = next((b for b in gw.bot_list() if b["id"] == leader["id"]), None)
+    if lead is None or lead["role"] == "L":
+        body.end_hold()
 
 
 # ---------------------------------------------------------------- live frame (built once, shared by all tabs)
@@ -121,7 +138,8 @@ def build_frame():
         "env": env,
         "bots": bots,
         "leader": leader["id"],
-        "body": {"enabled": body.enabled, "status": body.status, "gain": body.gain, "max_drop": body.max_drop},
+        "body": {"enabled": body.enabled, "status": body.status, "gain": body.gain, "max_drop": body.max_drop,
+                 "handover": body.handover},
         "cmd": gw.last_command(),
         "log": log,
         "log_seq": log_seq,
@@ -140,6 +158,7 @@ def maintenance():
         n += 1
         try:
             gw.tick()                       # command re-sends (20 Hz)
+            handover()                      # body tilt -> leader
             if n % 2 == 0:
                 hub.publish(json.dumps(build_frame()))   # dashboard frame (10 Hz)
             if n % 10 == 0:
@@ -198,14 +217,13 @@ def set_leader():
     if busy:
         return err(f"{busy['id']} is running '{busy['run']}'. Wait for it to finish, then choose the leader.")
     leader["id"] = bot_id
-    if body.enabled:
-        body.set_enabled(False)
-        gw.note("body tilt switched off because a leader was chosen")
     gw.note(f"leader set to {bot_id}")
-    for b in gw.bot_list():                      # followers first, so there is never a second leader
-        if b["id"] != bot_id and b["online"]:
-            send_role(b["id"], "F")
-    send_role(bot_id, "L")
+    if body.enabled or body.handover:            # land in the stand pose first; handover() sends the roles
+        if body.enabled:
+            body.set_enabled(False)
+            gw.note("body tilt switched off because a leader was chosen")
+        return jsonify(ok=True)
+    apply_roles_now()                            # followers first, so there is never a second leader
     return jsonify(ok=True)
 
 
@@ -221,6 +239,11 @@ def run_sequence():
         return err("Choose a leader first.")
     if not lead["online"]:
         return err(f"The leader ({lead['id']}) is offline.")
+    if body.handover or lead["role"] != "L":
+        return err(f"{lead['id']} is still switching to leader. Try again in a second.")
+    busy = busy_bot()
+    if busy:
+        return err(f"{busy['id']} is still running '{busy['run']}'.")
     rec = gw.command(lead["id"], f"seq {name}")
     return jsonify(ok=rec["state"] != "failed", id=rec["id"], error=rec.get("error", ""))
 
@@ -254,12 +277,12 @@ def body_cfg():
         busy = busy_bot()
         if on and busy:
             return err(f"{busy['id']} is running '{busy['run']}'. Wait for it to finish first.")
+        was = body.enabled
         body.set_enabled(on)
-        gw.note("body tilt " + ("on: all bots follow the Pi" if on else "off"))
+        if on != was:
+            gw.note("body tilt " + ("on: all bots follow the Pi" if on else "off: returning to stand, then to the leader"))
         if on:
-            apply_roles_now()
-        else:
-            threading.Timer(1.1, apply_roles_now).start()   # after the 1 s stand pose
+            apply_roles_now()                        # off: handover() sends the roles after the stand pose
     return jsonify(ok=True)
 
 

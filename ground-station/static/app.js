@@ -1,7 +1,8 @@
 (() => {
 'use strict';
 const $ = id => document.getElementById(id);
-const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let palette = {};        // CSS colour tokens, read once (and again when the light/dark scheme changes)
+const css = v => palette[v] || (palette[v] = getComputedStyle(document.documentElement).getPropertyValue(v).trim());
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
 let F = null;            // latest frame from the server
@@ -102,8 +103,10 @@ function buildSequences(names) {
 }
 function renderSequences() {
   const lead = F.bots.find(b => b.id === F.leader);
-  const running = lead && lead.run && lead.run !== '-' ? lead.run : '';
-  const usable = !!(lead && lead.online && !F.body.enabled && !running);   // a busy leader refuses new sequences
+  const busy = F.bots.find(b => b.online && b.run && b.run !== '-');      // followers play along, so wait for every bot
+  const running = busy ? busy.run : '';
+  const switching = !!(lead && (lead.role !== 'L' || F.body.handover));
+  const usable = !!(lead && lead.online && !F.body.enabled && !running && !switching);
   $('seqGrid').querySelectorAll('.seq').forEach(b => {
     if (b.disabled === usable) b.disabled = !usable;
     b.classList.toggle('running', b.dataset.seq === running);
@@ -113,7 +116,8 @@ function renderSequences() {
   if (F.body.enabled) txt = 'Body tilt is on. Switch it off to run sequences.';
   else if (!lead) txt = 'Choose a leader above to run sequences.';
   else if (!lead.online) { txt = `The leader ${slotOf(lead.id)} is offline.`; cls = 'bad'; }
-  else if (!c) txt = 'Sequences run on the leader; the follower copies it.';
+  else if (switching) { txt = `${slotOf(lead.id)} is switching to leader…`; cls = 'wait'; }
+  else if (!c) txt = 'The leader runs the sequence and the follower plays it in step.';
   else {
     const who = c.target === '*' ? 'all bots' : slotOf(c.target);
     if (c.state === 'sent') { txt = `Sending '${c.text}' to ${who}…` + (c.tries > 1 ? ` (try ${c.tries} of 3)` : ''); cls = 'wait'; }
@@ -141,7 +145,7 @@ function renderBody() {
 }
 
 /* ---------------------------------------------------------------- IMU 3D (plain 2D canvas, no WebGL) */
-const view = { yaw: -0.65, pitch: 0.45 };
+const view = { yaw: 2.5, pitch: 0.45 };     // seen from behind and above, the way you hold the IMU
 const trail = [];
 let imuDirty = true, lastTiltKey = '';
 function rotTilt(v, p, r) {            // pitch + = front (+Z) down, roll + = right (+X) down
@@ -154,7 +158,8 @@ function project(v, W, H) {
   const x = v[0] * cy + v[2] * sy, z = -v[0] * sy + v[2] * cy, y = v[1];
   const y2 = y * cx - z * sx, z2 = y * sx + z * cx;
   const d = 4.2, s = Math.min(W, H) * 0.36 * d / (d - z2);
-  return [W / 2 + x * s, H / 2 + 14 - y2 * s, z2];
+  // world axes x right, y up, z front form a left-handed set: flip x on screen so the drawing is not a mirror image
+  return [W / 2 - x * s, H / 2 + 14 - y2 * s, z2];
 }
 function drawImu() {
   const { ctx, W, H } = fitCanvas($('imuCanvas'));
@@ -220,7 +225,7 @@ function renderImu() {
   c.addEventListener('pointerdown', e => { drag = [e.clientX, e.clientY]; c.setPointerCapture(e.pointerId); c.style.cursor = 'grabbing'; });
   c.addEventListener('pointermove', e => {
     if (!drag) return;
-    view.yaw += (e.clientX - drag[0]) * 0.01; view.pitch = clamp(view.pitch + (e.clientY - drag[1]) * 0.01, -1.2, 1.45);
+    view.yaw -= (e.clientX - drag[0]) * 0.01; view.pitch = clamp(view.pitch + (e.clientY - drag[1]) * 0.01, -1.2, 1.45);
     drag = [e.clientX, e.clientY]; drawImu();
   });
   const end = () => { drag = null; c.style.cursor = ''; };
@@ -251,11 +256,19 @@ function drawChart(canvas, pts, color, digits) {
   [[WINDOW_S, '-30 min'], [WINDOW_S * 2 / 3, '-20'], [WINDOW_S / 3, '-10'], [0, 'now']].forEach(([ago, lab]) => {
     const x = X(now - ago); ctx.fillText(lab, Math.min(W - R - 26, Math.max(L, x - 14)), H - 6);
   });
-  ctx.beginPath();
-  data.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
-  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-  ctx.lineTo(X(data[data.length - 1][0]), H - B); ctx.lineTo(X(data[0][0]), H - B); ctx.closePath();
-  ctx.globalAlpha = 0.12; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+  // split where samples are missing (sensor stopped, tab was hidden) so a gap is not drawn as a straight line
+  const runs = [[data[0]]];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] - data[i - 1][0] > 15) runs.push([]);
+    runs[runs.length - 1].push(data[i]);
+  }
+  for (const run of runs) {
+    ctx.beginPath();
+    run.forEach((p, i) => { const x = X(p[0]), y = Y(p[1]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+    ctx.lineTo(X(run[run.length - 1][0]), H - B); ctx.lineTo(X(run[0][0]), H - B); ctx.closePath();
+    ctx.globalAlpha = 0.12; ctx.fillStyle = color; ctx.fill(); ctx.globalAlpha = 1;
+  }
 }
 function renderEnv() {
   for (const k of ['temperature', 'pressure']) {
@@ -289,9 +302,9 @@ function renderHeader(linkOk) {
 }
 
 /* ---------------------------------------------------------------- main loop: draw only the newest frame */
-let linkOk = false;
+let linkOk = false, lastFrameAt = 0, staleShown = false;
 function render() {
-  renderHeader(linkOk);
+  renderHeader(linkOk && Date.now() - lastFrameAt < 3000);
   renderLeaderSeg(); renderBots(); renderSequences(); renderBody(); renderImu(); renderEnv(); renderLog();
   if (chartsDirty) {
     chartsDirty = false;
@@ -302,6 +315,8 @@ function render() {
 function loop() {
   requestAnimationFrame(loop);
   if (dirty && F) { dirty = false; render(); }
+  const stale = linkOk && lastFrameAt && Date.now() - lastFrameAt > 3000;   // stream open but no usable frames
+  if (stale !== staleShown) { staleShown = stale; renderHeader(!stale && linkOk); if (stale) chip('chipLink', false, 'No data'); }
 }
 
 function wire() {
@@ -316,27 +331,37 @@ function wire() {
   $('gain').oninput = () => { sliderBusy = true; setText($('gainV'), ($('gain').value / 10).toFixed(1)); push(); };
   $('maxDrop').oninput = () => { sliderBusy = true; setText($('maxV'), $('maxDrop').value); push(); };
   window.addEventListener('resize', () => { imuDirty = true; chartsDirty = true; dirty = true; });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { palette = {}; imuDirty = chartsDirty = dirty = true; });
+}
+async function loadHistory() {
+  try {
+    const h = await (await fetch('/api/history')).json();
+    env.temperature = h.temperature || []; env.pressure = h.pressure || []; chartsDirty = true; dirty = true;
+  } catch (e) { /* charts keep what they have */ }
 }
 
 async function init() {
   wire();
   try { const cfg = await (await fetch('/api/config')).json(); buildSequences(cfg.sequences); } catch (e) { toast('Could not load the sequence list'); }
-  try { const h = await (await fetch('/api/history')).json(); env.temperature = h.temperature || []; env.pressure = h.pressure || []; } catch (e) { /* charts start empty */ }
+  await loadHistory();
   // One live stream per visible tab. Hidden tabs let go of it: Chromium allows only 6 connections per
   // server, and open streams from background tabs would otherwise stall commands and page loads.
-  let es = null;
+  let es = null, wasClosed = false, badFrames = 0;
   const open = () => {
     if (es) return;
+    if (wasClosed) loadHistory();            // fill in the samples missed while the tab was hidden
     es = new EventSource('/api/stream');
     es.onopen = () => { linkOk = true; dirty = true; };
     es.onerror = () => { linkOk = false; renderHeader(false); };
     es.onmessage = m => {
-      try { F = JSON.parse(m.data); } catch (e) { return; }
-      if (!F || !F.bots) return;
+      let f;
+      try { f = JSON.parse(m.data); } catch (e) { if (++badFrames === 1) toast('Got an unreadable update from the ground station'); return; }
+      if (!f || !f.bots) return;
+      F = f; badFrames = 0; lastFrameAt = Date.now();
       clockOffset = F.t - Date.now() / 1000; dirty = true;
     };
   };
-  const close = () => { if (es) { es.close(); es = null; linkOk = false; } };
+  const close = () => { if (es) { es.close(); es = null; linkOk = false; wasClosed = true; } };
   document.addEventListener('visibilitychange', () => (document.hidden ? close() : open()));
   if (!document.hidden) open();
   renderHeader(false); drawImu();

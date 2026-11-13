@@ -1,6 +1,27 @@
-.vscode/launch.json
-.idea/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
+*.egg-info/
+
+# Arduino / PlatformIO build output
+build/
+.pio/
+*.elf
+*.bin
+*.hex
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local tooling
+.claude/
+.env

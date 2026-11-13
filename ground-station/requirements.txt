@@ -1,5 +1,5 @@
 pyserial>=3.5
 flask>=3.0
 paho-mqtt>=2.0
-smbus2>=0.4                          # imu_publisher.py (MPU6500)
+spidev>=3.5                          # imu_publisher.py (MPU6500 on SPI)
 adafruit-circuitpython-bmp3xx>=1.3   # bmp388_publisher.py (BMP388)

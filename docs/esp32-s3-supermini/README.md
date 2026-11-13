@@ -1,8 +1,13 @@
 # ESP32-S3 SuperMini: Sesame Port Notes
 
-> **2026-11-12:** the old tester sketches named below now live in `firmware/archive/`. The bots run
-> `espnow-sequence-tester-pca`, the gateway runs `espnow-gateway`; see `firmware/README.md`.
-
+> [!NOTE]
+> These are working notes kept while porting Sesame to the ESP32-S3 SuperMini. Sections are dated and
+> some describe earlier stages. **Current state:** the bots run
+> [`firmware/espnow-sequence-tester-pca`](../../firmware/espnow-sequence-tester-pca/) and the gateway runs
+> [`firmware/espnow-gateway`](../../firmware/espnow-gateway/) (see [`firmware/README.md`](../../firmware/README.md)).
+> The bench testers named below were moved to [`firmware/archive/`](../../firmware/archive/README.md) on 2026-11-12.
+>
+> The vendor's own pinout sheet is kept in [vendor-pinout.md](vendor-pinout.md) for reference, but parts of it are wrong (section 2).
 
 Living notes for running the Sesame firmware on the ESP32-S3 SuperMini board
 (Ulegqin, pack of 3). Updated as we learn more.
@@ -98,8 +103,8 @@ File: `firmware/sesame-firmware-main/sesame-firmware-main.ino`
 - Wi-Fi AP "Sesame-Controller", captive portal, web server, mDNS.
 
 The other sketches differ:
-- `debugging-firmware/sesame-motor-tester.ino` uses the same direct-GPIO servo pins.
-- `face-tester/face-tester.ino` targets a Wemos D1 Mini (ESP8266), not an ESP32.
+- `debugging-firmware/sesame-motor-tester/sesame-motor-tester.ino` uses the same direct-GPIO servo pins.
+- `archive/face-tester/face-tester.ino` targets a Wemos D1 Mini (ESP8266), not an ESP32.
 
 ### Do we need the PCA9685?
 No. The ESP32-S3 has 8 LEDC PWM channels and any GPIO can use one, so 8 servos
@@ -179,12 +184,12 @@ Sketch folder: `firmware/sesame-firmware-main/`
 The serial command buffer was raised from 32 to 128 characters for `en send`.
 
 ### Standalone IMU tester
-`firmware/imu-tester/imu-tester.ino`: MPU6050-only test sketch (SDA 6, SCL 11),
+`firmware/archive/imu-tester/imu-tester.ino`: MPU6050-only test sketch (SDA 6, SCL 11),
 no servos or OLED. Commands: `s` I2C scan, `c` gyro calibrate, `p` pause,
 `m` text/Serial Plotter output, `r` re-init, `h` help.
 
 ### IMU + servo tester
-`firmware/imu-servo-tester/imu-servo-tester.ino`: IMU and servos together
+`firmware/archive/imu-servo-tester/imu-servo-tester.ino`: IMU and servos together
 (SDA 6, SCL 11, servos `{4, 5, 7, 1, 10, 2, 12, 13}`, L1/L2 swapped after assembly). Servos start limp.
 Commands: `<id> <angle>`, `all <angle>`, `sweep <id>`, `tilt <a> <b>` (servo a
 follows roll, b follows pitch), `gain`, `flip`, `stop`, `imu cal`, `p`, `h`.
@@ -203,7 +208,7 @@ same I2C bus (SDA 6, SCL 11). Libraries: ESP32Servo, Adafruit SSD1306, Adafruit 
 - OLED refresh is 4 Hz because each refresh blocks the I2C bus about 25 ms.
 
 ### I2C pin finder (when the scan finds nothing)
-`firmware/i2c-pin-finder/i2c-pin-finder.ino`: finds which GPIOs a device is
+`firmware/archive/i2c-pin-finder/i2c-pin-finder.ino`: finds which GPIOs a device is
 really wired to, without trusting any pinout. Phase 1 reads each GPIO with
 pull-down and pull-up (pins held HIGH are the MPU6050's SDA/SCL pull-ups, which
 also proves the module has power). Phase 2 scans SDA/SCL pairs among those pins.
@@ -216,10 +221,10 @@ Disconnect servos before running. `r` reruns, `f` forces a scan of all pins.
 - Joining a router (station mode or the web UI's Wi-Fi connect) moves the
   radio off channel 1 and breaks ESP-NOW with the other bot.
 - If the OLED is missing the firmware still halts at boot (unchanged behaviour).
-- Relative links to the moved headers in `firmware/README.md` are now broken.
+- ~~Relative links to the moved headers in `firmware/README.md` are now broken.~~ Fixed 2026-11-13.
 
 ### Battery level on the OLED (INA260), added 2026-11-08 (TEST ONLY, not in the main firmware)
-`espnow-sequence-tester/battery.h`, used by `espnow-sequence-tester.ino` (its own battery screen on the
+`firmware/archive/espnow-sequence-tester/battery.h`, used by `espnow-sequence-tester.ino` (its own battery screen on the
 OLED). It was first wired into `sesame-firmware-main` and then removed again; `battery.h` still has an
 overlay drawing function (`batteryDrawOverlay`) for putting the icon on the face if it goes back in.
 Not yet compiled or tested on hardware.
@@ -238,7 +243,7 @@ Not yet compiled or tested on hardware.
 
 ## 6b. Servo calibration and bench status (2026-11-08)
 
-**Sketch:** `espnow-sequence-tester/espnow-sequence-tester.ino` (two 8-servo bots, leader streams poses to follower). Not yet compiled/verified after the latest edits.
+**Sketch:** `firmware/archive/espnow-sequence-tester/espnow-sequence-tester.ino` (two 8-servo bots, leader streams poses to follower). Not yet compiled/verified after the latest edits.
 
 **Calibration model.** Sequences use logical angles (90 = rest). Just before the servo, `calibratedAngle()` converts:
 `physical = CAL_REST[i] + CAL_DIR[i] * (logical - 90)`, clamped 0..180. Same table on leader and follower; the stream carries logical angles.

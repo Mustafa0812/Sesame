@@ -1,7 +1,7 @@
 ## How to test the motors on the DIY Lolin S2 mini build
 
 > [!TIP]
-> This won't work if you don't have the motor testing firmware installed from the `/sesame-robot/firmware/debugging-firmware/sesame-motor-tester.ino`
+> This won't work if you don't have the motor testing firmware installed from [`firmware/debugging-firmware/sesame-motor-tester/sesame-motor-tester.ino`](../../firmware/debugging-firmware/sesame-motor-tester/sesame-motor-tester.ino)
 
 ### Step 1: Basic Motor Testing
 
@@ -9,7 +9,7 @@
 > Don't attach the hips while testing. All servos should be free to move without anything blocking them.
 
 1. Go to Arduino IDE and open the serial monitor.
-![Serial monitor](how%20to%20open%20searial%20monitor%20arudinoide.png)
+![Serial monitor](serial-monitor.png)
 2. Plug motor 0 into the correct port.
 3. In the serial monitor, type `0,90`.
 4. Type `stop` into the serial monitor to stop all servos moving.
